@@ -85,6 +85,7 @@ local function showHelp()
 	print("CTRL+SHIFT+Arrow to change space.")
 	print("CTRL+SHIFT+[WASD] to add a space.")
 	print("CTRL+SHIFT+Q to delete the current space.")
+	print("CTRL+SHIFT+P to toggle pausing the space.")
 	print("Terminate on an inactive space to quit.")
 end
 
