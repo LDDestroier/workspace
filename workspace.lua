@@ -334,7 +334,7 @@ Workspace.SetCustomFunctions = function(space)
 	assert(type(space.env) == "table", "space.env isn't a table?")
 
 	space.env.fs.open = function(path, mode)
-		if (space.resumes) and (path == "rom/startup.lua") then
+		if (space.resumes) and (path == "rom/startup.lua") and (mode == "r") then
 			real_file = _base.fs.open(path, "r")
 			return {
 				close = function()
