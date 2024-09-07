@@ -3,22 +3,24 @@ Workspace v2
   by LDDestroier
 
 TO-DO:
- * figure out how to get the shell's running program for each workspace for the Notification function
  * add background or pattern to represent the "void" between workspaces
- * add ability to swap workspaces
- * add config file
 
 --]]
 
-if (_G.workspace_running) then
-	print("Workspace is already running.")
-	return true
-end
+local _CONFIG_PATH = ".workspace.cfg"
+local first_run = true
+local tArg = {...}
 
--- keyDown key for either option key
-keys.ctrl = 500
-keys.alt = 501
-keys.shift = 502
+-- instructs on using the program
+local function showHelp()
+	print("CTRL+SHIFT+Arrow to change space.")
+	print("CTRL+SHIFT+[WASD] to add a space.")
+	print("CTRL+SHIFT+TAB+Arrow to swap spaces.")
+	print("CTRL+SHIFT+Q to delete the space.")
+	print("CTRL+SHIFT+P to pause the space.")
+	print("Terminate on an inactive space to quit.")
+	print("Run Workspace with --config to edit config.")
+end
 
 local config = {
 
@@ -28,6 +30,9 @@ local config = {
 	
 	-- when opening a new workspace, open the file picker by default
 	use_program_picker = false,
+
+	-- whether or not adding workspaces with CTRL+SHIFT+WASD will be remembered for later
+	update_space_grid = true,
 	
 	-- default program when opening a new workspace
 	default_program = "rom/programs/shell.lua",
@@ -64,8 +69,66 @@ local config = {
 		["pain.lua"] = "PAIN",
 		["stdgui.lua"] = "STD-GUI",
 		["tron.lua"] = "Tron",
+	},
+	space_grid = {
+		["1,1"] = true
 	}
 }
+
+local setConfig = function(path)
+	local contents = textutils.serialize(config)
+	local file = fs.open(path or _CONFIG_PATH, "w")
+	if (file) then
+		file.write(contents)
+		file.close()
+	else
+		error("Unable to write config to '" .. path .. "'")
+	end
+end
+
+local getConfig = function(path)
+	local contents, _config
+	local file = fs.open(path or _CONFIG_PATH, "r")
+	if (file) then
+		contents = file.readAll()
+		_config = textutils.unserialize(contents)
+		file.close()
+		if (_config) then
+			for k,v in pairs(_config) do
+				config[k] = v
+			end
+			return true
+		else
+			return false
+		end
+		
+	else
+		return false
+	end
+
+end
+
+-- allow changing config from commandline argument
+if (tArg[1] == "--config") then
+	shell.run("edit", _CONFIG_PATH)
+	if (_G.__WORKSPACE_RUNNING) then
+		_G.__WORKSPACE_STATE.do_refresh_config = true
+	end
+	return true
+end
+
+
+if (_G.__WORKSPACE_RUNNING) then
+	print("Workspace is already running.\n")
+	showHelp()
+	return true
+end
+
+-- keyDown key for either option key
+keys.ctrl = 500
+keys.alt = 501
+keys.shift = 502
+
 
 -- events that require focus
 local focus_events = {
@@ -80,17 +143,20 @@ local focus_events = {
 	["terminate"] = true
 }
 
--- instructs on using the program
-local function showHelp()
-	print("CTRL+SHIFT+Arrow to change space.")
-	print("CTRL+SHIFT+[WASD] to add a space.")
-	print("CTRL+SHIFT+Q to delete the current space.")
-	print("CTRL+SHIFT+P to toggle pausing the space.")
-	print("Terminate on an inactive space to quit.")
+function table.copy( tbl )
+	local output = {}
+	for key, value in pairs(tbl) do
+		if (type(value) == "table") and (tbl ~= value ) then
+			output[key] = table.copy(value)
+		else
+			output[key] = value
+		end
+	end
+	return output
 end
 
 -- native versions of certian functions that are modified for each workspace
-local og_func = {os = {}, term = {}, shell = {}}
+local _base = {os = {}, term = {}, fs = {}, shell = shell}
 
 -- global state
 local state = {
@@ -101,6 +167,14 @@ local state = {
 	-- terminal size
 	term_width = 1,
 	term_height = 1,
+	term = term.current(),
+
+	-- timer variables
+	timer = {
+		osd = 0,
+		scroll = 0,
+		tick = 0
+	},
 
 	-- currently selected workspace in the grid
 	x = 1,
@@ -117,6 +191,12 @@ local state = {
 	-- set this to true every time the layout of workspaces changes
 	do_refresh = true,
 
+	-- set this to true if you want to reload from the config file
+	do_refresh_config = false,
+
+	-- if true, redraw all visible windows
+	do_redraw = true,
+
 	-- window object for notifications (defined in main)
 	win_overlay = nil,
 	overlay_visible = false,
@@ -124,6 +204,10 @@ local state = {
 	-- sentinal for entire program
 	active = true
 }
+
+if (not _G.__WORKSPACE_RUNNING) then
+	_G.__WORKSPACE_STATE = state
+end
 
 state.term_width, state.term_height = term.getSize()
 
@@ -134,6 +218,14 @@ end
 
 local function XYtoIndex(x, y)
 	return tostring(x) .. "," .. tostring(y)
+end
+
+local function IndexToXY(key)
+	local x = tonumber(key:match("%d*"))
+	local y = tonumber(key:match(",%d*"):sub(2))
+	if (x and y) then
+		return x, y
+	end
 end
 
 -- aligned write
@@ -148,7 +240,7 @@ function awrite(text, y, mode, win)
 		win.setCursorPos( w_width - text:len() + 1, y or cy)
 	
 	elseif (mode == "center") then
-		win.setCursorPos( (w_width / 2) - math.floor(text:len() / 2) + 1, y or cy )
+		win.setCursorPos( math.floor(w_width / 2) - math.floor(text:len() / 2) + 1, y or cy )
 	end
 	win.write(text)
 end
@@ -168,7 +260,8 @@ function creposition(win, width, height)
 	)
 end
 
-function waitForKey(key)
+-- waits for specified keypress, or returns when a specified event is queued
+function waitForKey(key, break_events)
 	os.pullEvent()
 	local evt, _key, _repeat
 	while true do
@@ -178,8 +271,10 @@ function waitForKey(key)
 				return _key
 			end
 
-		elseif (evt == "term_resize") then
-			return false
+		elseif (break_events) then
+			if(break_events[evt]) then
+				return false, evt, _key, _repeat
+			end
 		end
 	end
 end
@@ -187,24 +282,88 @@ end
 -- all workspace-related functions
 local Workspace = {}
 
--- unmodified functions
-og_func.os.clock = os.clock
-og_func.os.startTimer = os.startTimer
-og_func.os.clock = os.clock
-og_func.os.time = os.time
-og_func.os.queueEvent = os.queueEvent
-og_func.term.redirect = term.redirect
-og_func.term.native = term.native
-og_func.term.setCursorPos = term.setCursorPos
+first_run = not getConfig()
+setConfig()
 
+-- unmodified functions
+_base.os.clock = os.clock
+_base.os.startTimer = os.startTimer
+_base.os.clock = os.clock
+_base.os.time = os.time
+_base.os.queueEvent = os.queueEvent
+_base.term.redirect = term.redirect
+_base.term.native = term.native
+_base.term.setCursorPos = term.setCursorPos
+_base.fs.open = fs.open
+
+Workspace.Get = function(x, y)
+	if (not x) then
+		return os.__WS_SPACE
+	else
+		assert(type(x) == "number", "x must be number")
+		assert(type(y) == "number", "y must be number")
+		return state.workspaces[XYtoIndex(x, y)]
+	end
+end
+
+Workspace.Select = function(x, y)
+	local key = XYtoIndex(x, y)
+	if (state.workspaces[key]) then
+		state.x = x
+		state.y = y
+		state.do_redraw = true
+		state.timer.scroll = os.startTimer(0)
+		return true
+	else
+		return false
+	end
+end
+
+-- clears entire workspace grid
+-- should only be used if you immediately 
+Workspace.Clear = function()
+	state.workspaces = {}
+	state.count = 0
+	state.do_redraw = true
+	state.do_refresh = true
+end
+
+-- ran at the beginning of every workspace coroutine resume
 Workspace.SetCustomFunctions = function(space)
 	assert(type(space) == "table", "space must be a table")
 	assert(type(space.env) == "table", "space.env isn't a table?")
 
-	os.startTimer = function(duration)
+	space.env.fs.open = function(path, mode)
+		if (space.resumes) and (path == "rom/startup.lua") then
+			real_file = _base.fs.open(path, "r")
+			return {
+				close = function()
+					return real_file.close()
+				end,
+				readLine = function()
+					return real_file.readLine()
+				end,
+				read = function()
+					return real_file.read()
+				end,
+				seek = function()
+					return real_file.seek()
+				end,
+				readAll = function()
+					local addendum = "\nos.__WS_SPACE.shell = shell"
+					return real_file.readAll() .. addendum
+				end
+			}
+		else
+			return _base.fs.open(path, mode)
+		end
+		
+	end
+
+	space.env.os.startTimer = function(duration)
 		if type(duration) == "number" then
 			state.new_timer_id = state.new_timer_id + 1
-			space.timers[state.new_timer_id] = og_func.os.clock() + space.clock_mod + duration
+			space.timers[state.new_timer_id] = _base.os.clock() + space.clock_mod + duration
 			return state.new_timer_id
 
 		else
@@ -212,7 +371,7 @@ Workspace.SetCustomFunctions = function(space)
 		end
 	end
 	
-	os.cancelTimer = function(id)
+	space.env.os.cancelTimer = function(id)
 		if type(id) == "number" then
 			space.timers[id] = nil
 
@@ -221,15 +380,15 @@ Workspace.SetCustomFunctions = function(space)
 		end
 	end
 	
-	os.clock = function()
-		return og_func.os.clock() + space.clock_mod
+	space.env.os.clock = function()
+		return _base.os.clock() + space.clock_mod
 	end
 	
-	os.time = function()
-		return (og_func.os.time() + space.time_mod) % 24
+	space.env.os.time = function()
+		return (_base.os.time() + space.time_mod) % 24
 	end
 
-	os.queueEvent = function(evt, ...)
+	space.env.os.queueEvent = function(evt, ...)
 		if type(evt) == "string" then
 			table.insert(space.queued_events, {evt, ...})
 
@@ -238,33 +397,34 @@ Workspace.SetCustomFunctions = function(space)
 		end
 	end
 
-	term.native = function(...)
+	space.env.term.native = function(...)
 		return space.og_window
 	end
 
-	term.setCursorPos = function(x, y)
-		og_func.term.setCursorPos(x, y)
-		space.cursor[1] = x
-		space.cursor[2] = y
-	end
-
-	os.__WS_SPACE = space
+	space.env.os.__WS_SPACE = space
+	space.env.os.Workspace = Workspace
 end
 
+-- ran at the end of every workspace coroutine resume
 Workspace.ResetCustomFunctions = function()
-	os.startTimer = og_func.os.startTimer
-	os.cancelTimer = og_func.os.cancelTimer
-	os.clock = og_func.os.clock
-	os.time = og_func.os.time
-	os.queueEvent = og_func.os.queueEvent
-	term.native = og_func.term.native
-	term.setCursorPos = og_func.term.setCursorPos
+	os.startTimer = _base.os.startTimer
+	os.cancelTimer = _base.os.cancelTimer
+	os.clock = _base.os.clock
+	os.time = _base.os.time
+	os.queueEvent = _base.os.queueEvent
+	term.native = _base.term.native
+	term.setCursorPos = _base.term.setCursorPos
+	fs.open = _base.fs.open
 end
 
 Workspace.DrawInactiveScreen = function(space)
 	term.clear()
 	term.setCursorBlink(false)
 	local base_y = math.ceil(state.term_height / 2) - 2
+
+	if (space.last_error) then
+		base_y = base_y - 1
+	end
 
 	local ccolor = ((space.x + space.y) % 2 == 0) and colors.gray or colors.lightGray
 	local cchar = "\127"
@@ -285,17 +445,36 @@ Workspace.DrawInactiveScreen = function(space)
 
 	term.setTextColor(colors.white)
 
-	cwrite("This workspace is inactive.", base_y)
+--	cwrite("This workspace is inactive.", base_y)
+	term.setTextColor(colors.yellow)
+	cwrite(space.path .. " " .. table.concat(space.args, " "), base_y - 1)
+	term.setTextColor(colors.white)
 	cwrite("Press Space to start workspace.", base_y + 1)
 	cwrite("(" .. space.x .. ", " .. space.y .. ")", base_y + 3)
+
+	if (space.last_error) then
+		cwrite("Last program's error:", base_y + 5)
+		term.setTextColor(colors.red)
+		cwrite(space.last_error:sub(1, state.term_width), base_y + 6)
+		cwrite(space.last_error:sub(state.term_width + 1, state.term_width * 2), base_y + 7)
+		cwrite(space.last_error:sub(state.term_width * 2 + 1), base_y + 8)
+	end
 end
 
 -- makes a new workspace object
-Workspace.Generate = function(path, x, y, active)
+Workspace.Generate = function(path, x, y, active, ...)
 	assert(type(x) == "number", "x must be number")
 	assert(type(y) == "number", "y must be number")
+
+	if (not fs.exists(path)) then
+		error("invalid path '" .. path .. "'")
+	end
+
+	local ws_args = {...}
+
 	local space = {
 		path = path,
+		args = ws_args,
 		title = config.program_titles[path] or config.program_titles[fs.getName(path)] or fs.getName(path),
 		x = x,
 		y = y,
@@ -305,7 +484,7 @@ Workspace.Generate = function(path, x, y, active)
 		allow_input = true,		-- when paused or unfocused, input is disallowed anyway
 		start_on_program = active,	-- on creation, whether or not to launch the program immediately
 		niceness = 0,			-- probably won't implement - influences how often the coroutine is resumed
-		cursor = {0, 0},
+		resumes = 0,
 
 		time_mod = 0,
 		time_last = 0,
@@ -318,7 +497,7 @@ Workspace.Generate = function(path, x, y, active)
 		queued_events = {},
 
 		window = window.create(
-			term.current(),
+			state.term,
 			1 + ((x - 1) * state.term_width),
 			1 + ((y - 1) * state.term_height),
 			state.term_width,
@@ -328,10 +507,12 @@ Workspace.Generate = function(path, x, y, active)
 	space.og_window = space.window
 	local runProgram
 
-	local callable = function(space)
+	local loaded_file = loadfile(path)
+
+	local callable = function(space, ws_args)
 		local status, err
 
-		runProgram = function()
+		runProgram = function(...)
 			space.active = true
 			term.setTextColor(colors.white)
 			term.setBackgroundColor(colors.black)
@@ -339,7 +520,12 @@ Workspace.Generate = function(path, x, y, active)
 			term.setCursorPos(1, 1)
 			term.setCursorBlink(true)
 			os.pullEvent()
-			status, err = pcall(dofile, path)
+			status, err = pcall(loaded_file, ...)
+			if (status) then
+				space.last_error = nil
+			else
+				space.last_error = err
+			end
 			-- reset state
 			space.queued_events = {}
 			space.time_mod = 0
@@ -349,42 +535,85 @@ Workspace.Generate = function(path, x, y, active)
 			space.epoch_mod = 0
 			space.epoch_last = 0
 			space.timers = {}
+			space.resumes = 0
 		end
 		
 		if (space.start_on_program) then
-			runProgram()
+			runProgram(table.unpack(ws_args))
 		end
 		while true do
 			space.active = false
 			Workspace.DrawInactiveScreen(space)
-			if ( waitForKey(keys.space) ) then
-				runProgram()
+			if ( waitForKey(keys.space, {["term_resize"] = true, ["workspace_swap"] = true}) ) then
+				runProgram(table.unpack(ws_args))
 			end
 		end
 	end
 
+	if (space.path == "rom/programs/shell.lua") then
+		_ENV.shell = nil
+	else
+		_ENV.shell = _base.shell
+	end
 	setmetatable(space.env, {__index = _ENV})
 	setfenv(callable, space.env)
+	setfenv(loaded_file, space.env)
 
 	space.coroutine = coroutine.create(function()
-		return callable(space)
+		return callable(space, ws_args)
 	end)
 	space.callable = callable
 	return space
 end
 
 -- makes a workspace and adds it to the grid
-Workspace.Add = function(path, x, y, active)
+Workspace.Add = function(path, x, y, active, ...)
+	-- try to convert "x,y" to numbers
+	if (type(x) == "string") then
+		x, y = IndexToXY(x)
+	end
 	assert(type(x) == "number", "X must be number")
 	assert(type(y) == "number", "Y must be number")
 
 	local key = XYtoIndex(x, y)
 	if (not state.workspaces[key]) then
-		state.workspaces[key] = Workspace.Generate(path, x, y, active)
+		state.workspaces[key] = Workspace.Generate(path, x, y, active, ...)
 		state.do_refresh = true
 		state.count = state.count + 1
+
+		state.do_refresh = true
+		state.do_redraw = true
 	end
 	return state[key]
+end
+
+Workspace.Swap = function(x1, y1, x2, y2)
+	assert(type(x1) == "number", "x1 must be number")
+	assert(type(y1) == "number", "y1 must be number")
+	assert(type(x2) == "number", "x2 must be number")
+	assert(type(y2) == "number", "y2 must be number")
+
+	local key1, key2 = XYtoIndex(x1, y1), XYtoIndex(x2, y2)
+	if not (state.workspaces[key1] and state.workspaces[key2]) then
+		return false
+	else
+		state.workspaces[key1], state.workspaces[key2] = state.workspaces[key2], state.workspaces[key1]
+		state.workspaces[key1].x = x1
+		state.workspaces[key1].y = y1
+		state.workspaces[key2].x = x2
+		state.workspaces[key2].y = y2
+		state.x = x2
+		state.y = y2
+		state.do_refresh = true
+		state.timer.scroll = os.startTimer(0)
+		if (not state.workspaces[key1].active) then
+			table.insert(state.workspaces[key1].queued_events, {"workspace_swap"})
+		end
+		if (not state.workspaces[key2].active) then
+			table.insert(state.workspaces[key2].queued_events, {"workspace_swap"})
+		end
+		return true
+	end
 end
 
 -- removes a workspace from the grid
@@ -393,13 +622,16 @@ Workspace.Remove = function(x, y)
 		state.workspaces[XYtoIndex(x, y)] = nil
 		state.do_refresh = true
 		state.count = state.count - 1
+		state.timer.scroll = os.startTimer(0)
+		state.do_refresh = true
+		state.do_redraw = true
 	end
 end
 
 Workspace.CheckVisible = function(space)
 	return (
-		math.abs(space.x - state.scroll_x) <= 1 and
-		math.abs(space.y - state.scroll_y) <= 1
+		math.abs(space.x - state.scroll_x) < 1 and
+		math.abs(space.y - state.scroll_y) < 1
 	)
 end
 
@@ -422,7 +654,31 @@ Workspace.PauseWorkspace = function(space, pause)
 	end
 end
 
+Workspace.GetGridMinMax = function()
+	if (state.count == 0) then
+		return 0, 0, 0, 0
+	end
+	local max_x, max_y = 0, 0
+	local min_x, min_y = math.huge, math.huge
+	for key, space in pairs(state.workspaces) do
+		max_x = math.max(max_x, space.x)
+		max_y = math.max(max_y, space.y)
+		min_x = math.min(min_x, space.x)
+		min_y = math.min(min_y, space.y)
+	end
+	return min_x, min_y, max_x, max_y
+end
+
 Workspace.Notification = function(mode, option)
+	if (not mode) then
+		state.win_overlay.setVisible(false)
+		state.overlay_visible = false
+		state.do_redraw = true
+		return
+	end
+
+	state.timer.osd = os.startTimer(config.osd_duration)
+
 	if (mode == "pause") then
 		local msg = option and "PAUSED" or "UNPAUSED"
 		creposition(state.win_overlay, msg:len() + 2, 3, true)
@@ -434,8 +690,7 @@ Workspace.Notification = function(mode, option)
 		cwrite(msg, 2, state.win_overlay)
 	
 	elseif (mode == "show_grid") then
-		local max_x, max_y = 0, 0
-		local min_x, min_y = math.huge, math.huge
+		local min_x, min_y, max_x, max_y = Workspace.GetGridMinMax()
 		local win = state.win_overlay
 		local x, y
 
@@ -447,6 +702,11 @@ Workspace.Notification = function(mode, option)
 		end
 
 		local space = state.workspaces[XYtoIndex(state.x, state.y)]
+		if (space.shell) then
+			space.title = space.shell.getRunningProgram() or ""
+		end
+		space.title = config.program_titles[space.title] or config.program_titles[fs.getName(space.title)] or space.title
+
 		local width
 		if (space.active) then
 			width = math.max(space.title:len() + 0, (max_x - min_x) + 3)
@@ -495,6 +755,8 @@ Workspace.Notification = function(mode, option)
 		end
 
 
+	else
+		os.cancelTimer(state.timer.osd)
 	end
 
 end
@@ -521,13 +783,20 @@ local function canRunWorkspace(space, evt, ignore_focus)
 end
 
 local function tryMoveViewport(x, y, do_skip)
-	if (state.workspaces[XYtoIndex(state.x + x, state.y + y)]) then
-		state.x = state.x + x
-		state.y = state.y + y
+	if (Workspace.Select(state.x + x, state.y + y)) then
 		return true
+
 	elseif (do_skip) then
 		-- do some workspace skipping logic
-
+		local min_x, min_y, max_x, max_y = Workspace.GetGridMinMax()
+		for i = math.min(min_x, min_y), math.max(max_x, max_y) do
+			if (x ~= 0) then x = x + (x / math.abs(x)) end
+			if (y ~= 0) then y = y + (y / math.abs(y)) end
+			if (Workspace.Select(state.x + x, state.y + y)) then
+				return true
+			end
+		end
+		return false
 	else
 		return false
 	end
@@ -537,10 +806,8 @@ local function main()
 	state.active = true
 	term.clear()
 
-	for x = 1, 3 do
-		for y = 1, 3 do
-			Workspace.Add(config.default_program, x, y)
-		end
+	for k,v in pairs(config.space_grid) do
+		Workspace.Add(config.default_program, k)
 	end
 
 	state.x = 1
@@ -548,8 +815,7 @@ local function main()
 	state.workspaces[XYtoIndex(state.x, state.y)].start_on_program = true
 
 	local evt = {}
-	local timer_osd, timer_scroll, timer_tick
-	timer_tick = os.startTimer(0)
+	state.timer.tick = os.startTimer(0)
 
 	state.win_overlay = window.create(term.current(), 1, 1, 1, 1, false)
 
@@ -558,9 +824,6 @@ local function main()
 
 	-- used as reference for fake timers
 	local current_clock = os.clock()
-
-	-- if true, redraw all visible windows
-	local do_redraw = true
 
 	-- if true, don't send the command keystrokes to the workspace
 	local did_command = false
@@ -589,87 +852,102 @@ local function main()
 				if (keysDown[keys.ctrl] and keysDown[keys.shift]) then
 
 					if (evt[2] == keys.right) then
-						if tryMoveViewport(1, 0, true) then timer_scroll = os.startTimer(0) end
+						if keysDown[keys.tab] then
+							Workspace.Swap(state.x, state.y, state.x + 1, state.y)
+						else
+							tryMoveViewport(1, 0, true)
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
 
 					elseif (evt[2] == keys.left) then
-						if tryMoveViewport(-1, 0, true) then timer_scroll = os.startTimer(0) end
+						if keysDown[keys.tab] then
+							Workspace.Swap(state.x, state.y, state.x - 1, state.y)
+						else
+							tryMoveViewport(-1, 0, true)
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
 
 					elseif (evt[2] == keys.up) then
-						if tryMoveViewport(0, -1, true) then timer_scroll = os.startTimer(0) end
+						if keysDown[keys.tab] then
+							Workspace.Swap(state.x, state.y, state.x, state.y - 1)
+						else
+							tryMoveViewport(0, -1, true)
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
 
 					elseif (evt[2] == keys.down) then
-						if tryMoveViewport(0, 1, true) then timer_scroll = os.startTimer(0) end
+						if keysDown[keys.tab] then
+							Workspace.Swap(state.x, state.y, state.x, state.y + 1)
+						else
+							tryMoveViewport(0, 1, true)
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
 
 					elseif (evt[2] == keys.p) then
 						if (_space.active) then
 							Workspace.PauseWorkspace(_space, not _space.paused)
 							Workspace.Notification("pause", _space.paused)
-							timer_osd = os.startTimer(config.osd_duration)
 							did_command = true
 						end
 
 					elseif (evt[2] == keys.w) then
 						Workspace.Add(config.default_program, state.x, state.y - 1)
+						if (config.update_space_grid) then
+							config.space_grid[XYtoIndex(state.x, state.y - 1)] = true
+							setConfig()
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
-						state.do_refresh = true
-						do_redraw = true
 					
 					elseif (evt[2] == keys.s) then
 						Workspace.Add(config.default_program, state.x, state.y + 1)
+						if (config.update_space_grid) then
+							config.space_grid[XYtoIndex(state.x, state.y + 1)] = true
+							setConfig()
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
-						state.do_refresh = true
-						do_redraw = true
 					
 					elseif (evt[2] == keys.a) then
 						Workspace.Add(config.default_program, state.x - 1, state.y)
+						if (config.update_space_grid) then
+							config.space_grid[XYtoIndex(state.x - 1, state.y)] = true
+							setConfig()
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
-						state.do_refresh = true
-						do_redraw = true
 					
 					elseif (evt[2] == keys.d) then
 						Workspace.Add(config.default_program, state.x + 1, state.y)
+						if (config.update_space_grid) then
+							config.space_grid[XYtoIndex(state.x + 1, state.y)] = true
+							setConfig()
+						end
 						Workspace.Notification("show_grid")
-						timer_osd = os.startTimer(config.osd_duration)
 						did_command = true
-						state.do_refresh = true
-						do_redraw = true
 					
 					elseif (evt[2] == keys.q) then
 						if (state.count >= 2) then
 							Workspace.Remove(state.x, state.y)
+							if (config.update_space_grid) then
+								config.space_grid[XYtoIndex(state.x, state.y)] = nil
+								setConfig()
+							end
 							if (state.workspaces[XYtoIndex(state.x - 1, state.y)]) then
 								state.x = state.x - 1
-								timer_scroll = os.startTimer(0) 
 
 							elseif (state.workspaces[XYtoIndex(state.x + 1, state.y)]) then
 								state.x = state.x + 1
-								timer_scroll = os.startTimer(0) 
 
 							elseif (state.workspaces[XYtoIndex(state.x, state.y - 1)]) then
 								state.y = state.y - 1
-								timer_scroll = os.startTimer(0) 
 
 							elseif (state.workspaces[XYtoIndex(state.x, state.y + 1)]) then
 								state.y = state.y + 1
-								timer_scroll = os.startTimer(0) 
 
 							else
 								for key, space in pairs(state.workspaces) do
@@ -677,14 +955,10 @@ local function main()
 									state.y = space.y
 									break
 								end
-								timer_scroll = os.startTimer(0) 
 							end
 
 							Workspace.Notification("show_grid")
-							timer_osd = os.startTimer(config.osd_duration)
 							did_command = true
-							state.do_refresh = true
-							do_redraw = true
 						end
 					end
 					
@@ -695,33 +969,33 @@ local function main()
 			keysDown[ evt[2] ] = false
 
 		elseif (evt[1] == "timer") then
-			if (evt[2] == timer_scroll) then
+			if (evt[2] == state.timer.scroll) then
 				if (state.x > state.scroll_x) then
 					state.scroll_x = math.min(state.scroll_x + config.scroll_speed, state.x)
-					timer_scroll = os.startTimer(config.scroll_delay)
+					state.timer.scroll = os.startTimer(config.scroll_delay)
 
 				elseif (state.x < state.scroll_x) then
 					state.scroll_x = math.max(state.scroll_x - config.scroll_speed, state.x)
-					timer_scroll = os.startTimer(config.scroll_delay)
+					state.timer.scroll = os.startTimer(config.scroll_delay)
 				end
 
 				if (state.y > state.scroll_y) then
 					state.scroll_y = math.min(state.scroll_y + config.scroll_speed, state.y)
-					timer_scroll = os.startTimer(config.scroll_delay)
+					state.timer.scroll = os.startTimer(config.scroll_delay)
 
 				elseif (state.y < state.scroll_y) then
 					state.scroll_y = math.max(state.scroll_y - config.scroll_speed, state.y)
-					timer_scroll = os.startTimer(config.scroll_delay)
+					state.timer.scroll = os.startTimer(config.scroll_delay)
 				end
-				do_redraw = true
-			elseif (evt[2] == timer_tick) then
-				timer_tick = os.startTimer(0)
+				state.do_redraw = true
+			elseif (evt[2] == state.timer.tick) then
+				state.timer.tick = os.startTimer(0)
 --				state.win_overlay.redraw()
 
-			elseif (evt[2] == timer_osd) then
+			elseif (evt[2] == state.timer.osd) then
 				state.win_overlay.setVisible(false)
 				state.overlay_visible = true
-				do_redraw = true
+				state.do_redraw = true
 
 			end
 
@@ -734,6 +1008,13 @@ local function main()
 			state.term_width, state.term_height = term.getSize()
 			state.do_refresh = true
 
+		end
+
+		-- reload config file if neccesary
+		if (state.do_refresh_config) then
+			state.do_refresh_config = false
+			getConfig()
+			setConfig()
 		end
 
 		current_clock = os.clock()
@@ -769,6 +1050,7 @@ local function main()
 						Workspace.SetCustomFunctions(space)
 						space.yield_return = {coroutine.resume(space.coroutine, table.unpack(space.queued_events[1]))}
 						Workspace.ResetCustomFunctions()
+						space.resumes = space.resumes + 1
 						term.redirect(c_term)
 						table.remove(space.queued_events, 1)
 					end
@@ -785,6 +1067,7 @@ local function main()
 					c_term = term.redirect(space.window)
 					Workspace.SetCustomFunctions(space)
 					space.yield_return = {coroutine.resume(space.coroutine, table.unpack(evt))}
+					space.resumes = space.resumes + 1
 					Workspace.ResetCustomFunctions()
 					term.redirect(c_term)
 				end
@@ -793,8 +1076,8 @@ local function main()
 			-- reposition windows so they move like a real desktop grid
 			if (Workspace.CheckVisible(space)) then
 				space.window.setVisible(true)
-				if (space.x == state.x and space.y == state.y) or (do_redraw) then
-					if (space.x ~= state.scroll_x) or (space.y ~= state.scroll_y) or (do_redraw) then
+				if (space.x == state.x and space.y == state.y) or (state.do_redraw) then
+					if (space.x ~= state.scroll_x) or (space.y ~= state.scroll_y) or (state.do_redraw) then
 						space.window.reposition(space_absX, space_absY)
 					end
 				end
@@ -807,7 +1090,7 @@ local function main()
 			end
 		end
 
-		do_redraw = false
+		state.do_redraw = false
 		state.do_refresh = false
 		did_command = false
 
@@ -834,15 +1117,19 @@ term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)
 term.setCursorPos(1, 1)
 term.clear()
-print("Welcome to Workspace!\n")
-showHelp()
-print("\nPress any key to continue.")
-waitForKey()
+if (first_run) then
+	print("Welcome to Workspace!\n")
+	showHelp()
+	print("\nPress any key to continue.")
+	waitForKey()
+end
 
-_G.workspace_running = true
+_G.__WORKSPACE_RUNNING = true
 
 while (state.active) do
 	status, err = pcall(main)
+	term.setTextColor(colors.white)
+	term.setBackgroundColor(colors.black)
 	if (not status) then
 		state.active = false
 		handleError(err)
@@ -854,4 +1141,5 @@ while (state.active) do
 	end
 end
 
-_G.workspace_running = false
+_G.__WORKSPACE_RUNNING = false
+_G.__WORKSPACE_STATE = nil
