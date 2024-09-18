@@ -4,6 +4,7 @@ Workspace v2
 
   TODO:
 	* find out how to access each currently running shell program via debug API
+	* add a file picker
 
 --]]
 
@@ -25,13 +26,14 @@ end
 local config = {
 
 	-- speed at which viewport scrolls by. range is between 0.001 and 1
-	scroll_speed = 0.25,
+	scroll_speed = 0.35,
 	scroll_delay = 0.05,
 
 	-- delay between redrawing windows
 	redraw_tick_delay = 0.05,
 
 	-- when opening a new workspace, open the file picker by default
+	-- WIP
 	use_program_picker = false,
 
 	-- whether or not adding workspaces with CTRL+SHIFT+WASD will be remembered for later
@@ -42,6 +44,10 @@ local config = {
 
 	-- whether or not pausing is permitted
 	allow_pausing = true,
+
+	-- whether or not to draw the void static pattern
+	-- on higher resolution displays, this can have a performance hit
+	do_draw_void = true,
 
 	-- amount of time the workspace grid display is shown when it pops up
 	osd_duration = 0.6,
@@ -78,8 +84,49 @@ local config = {
 	}
 }
 
-local setConfig = function(path)
-	local contents = textutils.serialize(config)
+-- serializes and organizes by value type
+local function niceSerialize(tbl)
+	local output = "{"
+
+	local stuff = {}
+	local priority = {
+		"boolean",
+		"number",
+		"string",
+		"table",
+	}
+
+	for k, v in pairs(tbl) do
+		stuff[type(v)] = stuff[type(v)] or {}
+		stuff[type(v)][k] = v
+	end
+
+	for i = 1, #priority do
+		for k,v in pairs(stuff[priority[i]]) do
+			if (type(k) == "string") then
+				output = output .. "\n\t" .. k
+
+			elseif (type(k) == "number") then
+				output = output .. "\n\t[" .. k .. "]"
+
+			elseif (type(k) == "table") then
+				output = output .. "\n\t[ " .. textutils.serialize(k) .. " ]"
+			end
+
+			output = output .. " = " .. textutils.serialize(v):gsub("\n", "\n ") .. ","
+		end
+		if (i ~= #priority) then
+			output = output .. "\n"
+		end
+	end
+	output = output:sub(1, -2) .. "\n}"
+
+	return output
+
+end
+
+local function setConfig(path)
+	local contents = niceSerialize(config)
 	local file = fs.open(path or _CONFIG_PATH, "w")
 	if (file) then
 		file.write(contents)
@@ -89,7 +136,7 @@ local setConfig = function(path)
 	end
 end
 
-local getConfig = function(path)
+local function getConfig(path)
 	local contents, _config
 	local file = fs.open(path or _CONFIG_PATH, "r")
 	if (file) then
@@ -100,6 +147,10 @@ local getConfig = function(path)
 			for k,v in pairs(_config) do
 				config[k] = v
 			end
+
+			-- set bounds
+			config.scroll_speed = math.min(math.max(config.scroll_speed, 0.001), 1)
+
 			return true
 		else
 			return false
@@ -202,7 +253,7 @@ local state = {
 
 	-- window object for notifications (defined in main)
 	win_overlay = nil,
-	overlay_visible = false,
+	is_overlay_visible = false,
 
 	-- if the void between windows is visible
 	is_void_visible = false,
@@ -715,7 +766,7 @@ end
 Workspace.Notification = function(mode, option)
 	if (not mode) then
 		state.win_overlay.setVisible(false)
-		state.overlay_visible = false
+		state.is_overlay_visible = false
 		state.do_redraw = true
 		return
 	end
@@ -726,7 +777,7 @@ Workspace.Notification = function(mode, option)
 		local msg = option and "PAUSED" or "UNPAUSED"
 		creposition(state.win_overlay, msg:len() + 2, 3)
 		state.win_overlay.setVisible(true)
-		state.overlay_visible = true
+		state.is_overlay_visible = true
 		state.win_overlay.setTextColor(colors.black)
 		state.win_overlay.setBackgroundColor(colors.white)
 		state.win_overlay.clear()
@@ -759,7 +810,7 @@ Workspace.Notification = function(mode, option)
 
 		creposition(state.win_overlay, width, (max_y - min_y) + 3)
 		win.setVisible(true)
-		state.overlay_visible = true
+		state.is_overlay_visible = true
 		win.setTextColor(colors.black)
 		win.setBackgroundColor(colors.white)
 		win.clear()
@@ -843,19 +894,17 @@ local function tryMoveViewport(x, y, do_skip)
 end
 
 local function drawVoid(win)
-	local width, height = state.term_width, state.term_height
-	local line_ch, line_tx, line_bg = "", ""
-	local line_bg = string.rep("f", width)
+	local line_ch = ("f"):rep(state.term_width)
+	local line_tx = ("f"):rep(state.term_width)
+	local line_bg = ("f"):rep(state.term_width)
 
-	for y = 1, height do
-		line_ch = ""
-		line_tx = ""
-		for x = 1, width do
-			line_ch = line_ch .. string.char( math.max(128, math.random(128, 159)) )
-			line_tx = line_tx .. ({"7", "f"})[math.random(1, 2)]
-		end
+	for y = 1, state.term_height do
 		win.setCursorPos(1, y)
-		win.blit(line_ch, line_tx, line_bg)
+		win.blit(
+			line_ch:gsub(".", function() return string.char(math.random(128, 159)) end),
+			line_tx:gsub(".", function() return math.random(1, 2) and "7" or "f" end),
+			line_bg
+		)
 	end
 end
 
@@ -1109,14 +1158,14 @@ local function main()
 				local xdiff = state.x - state.scroll_x
 				local ydiff = state.y - state.scroll_y
 
-				if (math.abs(xdiff) < 0.02) then
+				if (math.abs(xdiff) < 0.01) then
 					state.scroll_x = state.x
 				else
 					state.timer.scroll = os.startTimer(config.scroll_delay)
 					state.scroll_x = state.scroll_x + (xdiff * config.scroll_speed)
 				end
 
-				if (math.abs(ydiff) < 0.02) then
+				if (math.abs(ydiff) < 0.01) then
 					state.scroll_y = state.y
 				else
 					state.timer.scroll = os.startTimer(config.scroll_delay)
@@ -1131,7 +1180,7 @@ local function main()
 
 			elseif (evt[2] == state.timer.osd) then
 				state.win_overlay.setVisible(false)
-				state.overlay_visible = false
+				state.is_overlay_visible = false
 				state.do_redraw = true
 				state.do_refresh = true
 
@@ -1143,7 +1192,7 @@ local function main()
 			end
 
 		elseif (evt[1] == "terminate") then
-			if (state.workspaces[XYtoIndex(state.x, state.y)].active == false) then
+			if (_space.active == false) then
 				state.active = false
 			end
 
@@ -1168,7 +1217,7 @@ local function main()
 			state.y == (state.scroll_y - (state.drag_scroll[2] or 0))
 		)
 
-		if (state.is_void_visible or state.overlay_visible) then
+		if (state.is_void_visible or state.is_overlay_visible) then
 
 			state.do_refresh = true
 
@@ -1177,7 +1226,11 @@ local function main()
 			end
 			state.use_alt_term = true
 			if (is_redraw_tick) then
-				drawVoid(state.alt_term)
+				if (config.do_draw_void) then
+					drawVoid(state.alt_term)
+				else
+					state.alt_term.clear()
+				end
 			end
 
 		else
@@ -1243,7 +1296,7 @@ local function main()
 			until (not canRunWorkspace(space, space.queued_events[1])) or (times_queued > max_queued)
 
 			-- handle real events
-			if not (did_command and focus_events[evt[1]]) then
+			if not ((did_command and focus_events[evt[1]]) or (evt[1] == "timer")) then
 				if (canRunWorkspace(space, evt)) then
 					if (state.x == space.x and state.y == space.y) then
 						space.window.restoreCursor()
@@ -1260,11 +1313,9 @@ local function main()
 			-- reposition windows so they move like a real desktop grid
 			if (Workspace.CheckVisible(space, state.drag_scroll[1], state.drag_scroll[2])) then
 				space.window.setVisible(true)
---				if (space.x == state.x and space.y == state.y) then
 					if (space.x ~= state.scroll_x) or (space.y ~= state.scroll_y) then
 						space.window.reposition(space_absX, space_absY)
 					end
---				end
 			else
 				space.window.setVisible(false)
 			end
@@ -1272,7 +1323,7 @@ local function main()
 		end
 
 		if (is_redraw_tick) then
-			if (state.overlay_visible) then
+			if (state.is_overlay_visible) then
 				state.win_overlay.redraw()
 			end
 
