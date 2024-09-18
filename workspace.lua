@@ -169,9 +169,13 @@ if (tArg[1] == "--config") then
 		os.queueEvent("workspace_refresh_config")
 	end
 	return true
+
+elseif (tArg[1] == "--help") then
+	showHelp()
+	return true
 end
 
-
+--[[
 if (_G.__WORKSPACE_RUNNING) then
 	if (shell.getRunningProgram() ~= "startup.lua") then
 		print("Workspace is already running.\n")
@@ -179,6 +183,7 @@ if (_G.__WORKSPACE_RUNNING) then
 	end
 	return true
 end
+--]]
 
 -- keyDown key for either option key
 keys.ctrl = 500
@@ -426,7 +431,7 @@ Workspace.SetCustomFunctions = function(space)
 	assert(type(space.env) == "table", "space.env isn't a table?")
 
 	space.env.fs.open = function(path, mode)
-		if (space.resumes) and (path == "rom/startup.lua") and (mode == "r") then
+		if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
 			real_file = _base.fs.open(path, "r")
 			return {
 				close = function()
@@ -442,8 +447,10 @@ Workspace.SetCustomFunctions = function(space)
 					return real_file.seek()
 				end,
 				readAll = function()
-					local addendum = "\nos.__WS_SPACE.shell = shell"
-					return real_file.readAll() .. addendum
+					local output = real_file.readAll()
+					output = output:gsub("shell.run%(v%)", "")
+					output = output .. "\n\nos.__WS_SPACE.shell = shell"
+					return output
 				end
 			}
 		else
@@ -614,6 +621,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 			term.setCursorPos(1, 1)
 			term.setCursorBlink(true)
 			os.pullEvent()
+			space.resumes = 0
 			status, err = pcall(loaded_file, ...)
 			if (status) then
 				space.last_error = nil
@@ -633,6 +641,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 		end
 
 		if (space.start_on_program) then
+			os.queueEvent("timer", 0)
 			runProgram(table.unpack(ws_args))
 		end
 		while true do
@@ -952,6 +961,7 @@ local function main()
 	while (state.active) do
 
 		is_redraw_tick = false
+		_G.__WORKSPACE_RUNNING = true
 
 		evt = {os.pullEventRaw()}
 
@@ -1240,10 +1250,6 @@ local function main()
 			end
 			state.use_alt_term = false
 		end
-
---		if (state.is_dragging) then
---			state.do_refresh = true
---		end
 
 		-- iterate through all workspaces and do shit
 
