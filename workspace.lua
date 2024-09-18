@@ -122,8 +122,10 @@ end
 
 
 if (_G.__WORKSPACE_RUNNING) then
-	print("Workspace is already running.\n")
-	showHelp()
+	if (shell.getRunningProgram() ~= "startup.lua") then
+		print("Workspace is already running.\n")
+		showHelp()
+	end
 	return true
 end
 
