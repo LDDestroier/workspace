@@ -441,38 +441,34 @@ Workspace.SetCustomFunctions = function(space)
 	assert(type(space) == "table", "space must be a table")
 	assert(type(space.env) == "table", "space.env isn't a table?")
 
-	if (space.resumes == 0) then
-		space.env.fs.open = function(path, mode)
-			if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
-				real_file = _base.fs.open(path, "r")
-				return {
-					close = function(...)
-						return real_file.close(...)
-					end,
-					readLine = function(...)
-						return real_file.readLine(...)
-					end,
-					read = function(...)
-						return real_file.read(...)
-					end,
-					seek = function(...)
-						return real_file.seek(...)
-					end,
-					readAll = function(...)
-						local output = real_file.readAll(...)
-						output = output:gsub("shell.run%(v%)", "")
-						output = output .. "\n\nos.__WS_SPACE.shell = shell"
-						return output
-					end
-				}
-			else
-				return _base.fs.open(path, mode)
-			end
+	space.env.fs.open = function(path, mode)
+		if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
+			real_file = _base.fs.open(path, "r")
+			return {
+				close = function(...)
+					return real_file.close(...)
+				end,
+				readLine = function(...)
+					return real_file.readLine(...)
+				end,
+				read = function(...)
+					return real_file.read(...)
+				end,
+				seek = function(...)
+					return real_file.seek(...)
+				end,
+				readAll = function(...)
+					local output = real_file.readAll(...)
+					output = output:gsub("shell.run%(v%)", "")
+					output = output .. "\n\nos.__WS_SPACE.shell = shell"
+					return output
+				end
+			}
 
+		else
+			return _base.fs.open(path, mode)
 		end
 
-	else
-		space.env.fs.open = _base.fs.open
 	end
 
 	space.env.os.startTimer = function(duration)
