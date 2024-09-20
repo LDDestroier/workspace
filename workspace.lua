@@ -49,6 +49,9 @@ local config = {
 	-- on higher resolution displays, this can have a performance hit
 	do_draw_void = true,
 
+	-- if true, then os.queueEvent will not send events to other workspaces
+	private_queued_events = false,
+
 	-- amount of time the workspace grid display is shown when it pops up
 	osd_duration = 0.6,
 
@@ -201,7 +204,8 @@ local focus_events = {
 	["mouse_up"] = true,
 	["mouse_scroll"] = true,
 	["paste"] = true,
-	["terminate"] = true
+	["terminate"] = true,
+	["file_transfer"] = true,
 }
 
 -- native versions of certian functions that are modified for each workspace
@@ -297,6 +301,10 @@ local function round(num)
 	return math.floor(num + 0.5)
 end
 
+local function roundp(num, places)
+	return math.floor(num * (10^places)) / (10^places)
+end
+
 -- aligned write
 local function awrite(text, y, mode, win)
 	win = win or term.current()
@@ -372,12 +380,15 @@ setConfig()
 -- unmodified functions
 _base.os.clock = os.clock
 _base.os.startTimer = os.startTimer
+_base.os.cancelTimer = os.cancelTimer
+_base.os.setAlarm = os.setAlarm
+_base.os.cancelAlarm = os.cancelAlarm
 _base.os.clock = os.clock
 _base.os.time = os.time
+_base.os.epoch = os.epoch
 _base.os.queueEvent = os.queueEvent
 _base.term.redirect = term.redirect
 _base.term.native = term.native
-_base.term.setCursorPos = term.setCursorPos
 _base.fs.open = fs.open
 
 Workspace.Get = function(x, y)
@@ -430,33 +441,38 @@ Workspace.SetCustomFunctions = function(space)
 	assert(type(space) == "table", "space must be a table")
 	assert(type(space.env) == "table", "space.env isn't a table?")
 
-	space.env.fs.open = function(path, mode)
-		if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
-			real_file = _base.fs.open(path, "r")
-			return {
-				close = function()
-					return real_file.close()
-				end,
-				readLine = function()
-					return real_file.readLine()
-				end,
-				read = function()
-					return real_file.read()
-				end,
-				seek = function()
-					return real_file.seek()
-				end,
-				readAll = function()
-					local output = real_file.readAll()
-					output = output:gsub("shell.run%(v%)", "")
-					output = output .. "\n\nos.__WS_SPACE.shell = shell"
-					return output
-				end
-			}
-		else
-			return _base.fs.open(path, mode)
+	if (space.resumes == 0) then
+		space.env.fs.open = function(path, mode)
+			if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
+				real_file = _base.fs.open(path, "r")
+				return {
+					close = function(...)
+						return real_file.close(...)
+					end,
+					readLine = function(...)
+						return real_file.readLine(...)
+					end,
+					read = function(...)
+						return real_file.read(...)
+					end,
+					seek = function(...)
+						return real_file.seek(...)
+					end,
+					readAll = function(...)
+						local output = real_file.readAll(...)
+						output = output:gsub("shell.run%(v%)", "")
+						output = output .. "\n\nos.__WS_SPACE.shell = shell"
+						return output
+					end
+				}
+			else
+				return _base.fs.open(path, mode)
+			end
+
 		end
 
+	else
+		space.env.fs.open = _base.fs.open
 	end
 
 	space.env.os.startTimer = function(duration)
@@ -483,13 +499,44 @@ Workspace.SetCustomFunctions = function(space)
 		return _base.os.clock() + space.clock_mod
 	end
 
-	space.env.os.time = function()
-		return (_base.os.time() + space.time_mod) % 24
+	space.env.os.time = function(...)
+		return (_base.os.time(...) + space.time_mod) % 24
+	end
+
+	space.env.os.epoch = function(...)
+		return (_base.os.epoch(...) + space.epoch_mod)
+	end
+
+	space.env.os.setAlarm = function(time)
+		if (type(time) == "number") then
+			state.new_timer_id = state.new_timer_id + 1
+			space.alarms[state.new_timer_id] = roundp(time % 24, 3)
+			return state.new_timer_id
+
+		else
+			error("bad argument #1 (number expected, got " .. type(time) .. ")", 2)
+		end
+	end
+
+	space.env.os.cancelAlarm = function(id)
+		if type(id) == "number" then
+			space.alarms[id] = nil
+
+		else
+			error("bad argument #1 (number expected, got " .. type(id) .. ")", 2)
+		end
 	end
 
 	space.env.os.queueEvent = function(evt, ...)
 		if type(evt) == "string" then
-			table.insert(space.queued_events, {evt, ...})
+			if (focus_events[evt]) or (config.private_queued_events) then
+				table.insert(space.queued_events, {evt, ...})
+
+			else
+				for k,v in pairs(state.workspaces) do
+					table.insert(v.queued_events, {evt, ...})
+				end
+			end
 
 		else
 			error("bad argument #1 (number expected, got " .. type(evt) .. ")", 2)
@@ -508,11 +555,13 @@ end
 Workspace.ResetCustomFunctions = function()
 	os.startTimer = _base.os.startTimer
 	os.cancelTimer = _base.os.cancelTimer
+	os.setAlarm = _base.os.setAlarm
+	os.cancelAlarm = _base.os.cancelAlarm
 	os.clock = _base.os.clock
 	os.time = _base.os.time
+	os.epoch = _base.os.epoch
 	os.queueEvent = _base.os.queueEvent
 	term.native = _base.term.native
-	term.setCursorPos = _base.term.setCursorPos
 	fs.open = _base.fs.open
 end
 
@@ -593,6 +642,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 		epoch_last = 0,
 
 		timers = {},
+		alarms = {},
 		yield_return = {},
 		queued_events = {},
 
@@ -744,14 +794,14 @@ Workspace.PauseWorkspace = function(space, pause)
 	end
 
 	if (pause) then
-		space.clock_last = os.clock() + space.clock_mod
-		space.time_last = os.time() + space.time_mod
-		space.epoch_last = os.epoch() + space.epoch_mod
+		space.clock_last = os.clock() + space.clock_mod - 0.1
+		space.time_last = os.time() + space.time_mod - 0.001
+		space.epoch_last = os.epoch() + space.epoch_mod - 1000
 		space.paused = true
 
 	else
-		space.clock_mod = space.clock_last - os.clock()
-		space.time_mod = space.time_last - os.time()
+		space.clock_mod = roundp(space.clock_last - os.clock(), 3)
+		space.time_mod = roundp(space.time_last - os.time(), 3)
 		space.epoch_mod = space.epoch_last - os.epoch()
 		space.paused = false
 	end
@@ -940,6 +990,7 @@ local function main()
 
 	-- used as reference for fake timers
 	local current_clock = os.clock()
+	local current_time = os.time()
 
 	-- if true, don't send the command keystrokes to the workspace
 	local did_command = false
@@ -1221,6 +1272,7 @@ local function main()
 		end
 
 		current_clock = os.clock()
+		current_time = os.time()
 
 		state.is_void_visible = not (
 			state.x == (state.scroll_x - (state.drag_scroll[1] or 0)) and
@@ -1268,18 +1320,30 @@ local function main()
 					(state.use_alt_term and state.alt_term or state.term)
 				)
 			end
-
-			-- handle fake timers
-			for tID, tClock in pairs(space.timers) do
-				if (tClock <= current_clock + space.clock_mod) then
-					space.timers[tID] = nil
-					table.insert(space.queued_events, {"timer", tID})
-				end
-			end
-
 			-- handle manually queued events
 			times_queued = 0
+
 			repeat
+
+				-- handle fake timers
+				for tID, tClock in pairs(space.timers) do
+					if (tClock <= current_clock + space.clock_mod) then
+						space.timers[tID] = nil
+						table.insert(space.queued_events, {"timer", tID})
+					end
+				end
+
+				-- handle fake alarms
+				for aID, aTime in pairs(space.alarms) do
+					if (
+						(((current_time + space.time_mod) % 24) >= aTime) and 
+						(((current_time + space.time_mod) % 24) <= aTime + 0.001)
+						) then
+						space.alarms[aID] = nil
+						table.insert(space.queued_events, {"alarm", aID})
+					end
+				end
+
 				if (space.queued_events[1]) then
 					if (space.queued_events[1][1] == "workspace_refresh_config") then
 						state.do_refresh_config = true
@@ -1299,6 +1363,7 @@ local function main()
 						table.remove(space.queued_events, 1)
 					end
 				end
+
 			until (not canRunWorkspace(space, space.queued_events[1])) or (times_queued > max_queued)
 
 			-- handle real events
