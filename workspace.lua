@@ -8,9 +8,16 @@ Workspace v2
 
 --]]
 
-local _CONFIG_PATH = ".workspace.cfg"
+local _CONFIG_DIR = ".workspace"
+local _CONFIG_PATH = "workspace.cfg"
+local _WS_STARTUP_PATH = "start.lua"
+local _BASE_SHELL = shell
+
 local first_run = true
 local tArg = {...}
+
+-- copy of _G, defined in main
+local __G = {}
 
 -- instructs on using the program
 local function showHelp()
@@ -130,7 +137,7 @@ end
 
 local function setConfig(path)
 	local contents = niceSerialize(config)
-	local file = fs.open(path or _CONFIG_PATH, "w")
+	local file = fs.open(path or fs.combine(_CONFIG_DIR, _CONFIG_PATH), "w")
 	if (file) then
 		file.write(contents)
 		file.close()
@@ -141,7 +148,7 @@ end
 
 local function getConfig(path)
 	local contents, _config
-	local file = fs.open(path or _CONFIG_PATH, "r")
+	local file = fs.open(path or fs.combine(_CONFIG_DIR, _CONFIG_PATH), "r")
 	if (file) then
 		contents = file.readAll()
 		_config = textutils.unserialize(contents)
@@ -167,7 +174,7 @@ end
 
 -- allow changing config from commandline argument
 if (tArg[1] == "--config") then
-	shell.run("edit", _CONFIG_PATH)
+	shell.run("edit", fs.combine(_CONFIG_DIR, _CONFIG_PATH))
 	if (_G.__WORKSPACE_RUNNING) then
 		os.queueEvent("workspace_refresh_config")
 	end
@@ -192,7 +199,6 @@ end
 keys.ctrl = 500
 keys.alt = 501
 keys.shift = 502
-
 
 -- events that require focus
 local focus_events = {
@@ -296,6 +302,18 @@ local function IndexToXY(key)
 	end
 end
 
+function table.copy(tbl)
+	local output = {}
+	for k,v in pairs(tbl) do
+		if (type(v) == "table") and (v ~= tbl) then
+			output[k] = table.copy(v)
+		else
+			output[k] = v
+		end
+	end
+	return output
+end
+
 -- round to nearest integer
 local function round(num)
 	return math.floor(num + 0.5)
@@ -393,7 +411,7 @@ _base.fs.open = fs.open
 
 Workspace.Get = function(x, y)
 	if (not x) then
-		return os.__WS_SPACE
+		return __G.__WS_SPACE
 	else
 		assert(type(x) == "number", "x must be number")
 		assert(type(y) == "number", "y must be number")
@@ -401,12 +419,17 @@ Workspace.Get = function(x, y)
 	end
 end
 
-Workspace.Select = function(x, y)
+Workspace.Select = function(x, y, instant_scroll)
 	local key = XYtoIndex(x, y)
 	if (state.workspaces[key]) then
 		state.x = x
 		state.y = y
+		if (instant_scroll) then
+			state.scroll_x = x
+			state.scroll_y = y
+		end
 		state.do_redraw = true
+		state.do_refresh = true
 		state.timer.scroll = os.startTimer(0)
 		return true
 	else
@@ -460,7 +483,9 @@ Workspace.SetCustomFunctions = function(space)
 				readAll = function(...)
 					local output = real_file.readAll(...)
 					output = output:gsub("shell.run%(v%)", "")
-					output = output .. "\n\nos.__WS_SPACE.shell = shell"
+					output = output .. [[
+						_G.__WS_SPACE.shell = shell
+					]]
 					return output
 				end
 			}
@@ -543,8 +568,7 @@ Workspace.SetCustomFunctions = function(space)
 		return space.og_window
 	end
 
-	space.env.os.__WS_SPACE = space
-	space.env.os.Workspace = Workspace
+	__G.__WS_SPACE = space
 end
 
 -- ran at the end of every workspace coroutine resume
@@ -704,7 +728,8 @@ Workspace.Generate = function(path, x, y, active, ...)
 	else
 		_ENV.shell = _base.shell
 	end
-	setmetatable(space.env, {__index = _ENV})
+	
+	setmetatable(space.env, {__index = __G })
 	setfenv(callable, space.env)
 	setfenv(loaded_file, space.env)
 
@@ -721,6 +746,8 @@ Workspace.Add = function(path, x, y, active, ...)
 	if (type(x) == "string") then
 		x, y = IndexToXY(x)
 	end
+
+	path = path or config.default_program
 	assert(type(x) == "number", "X must be number")
 	assert(type(y) == "number", "Y must be number")
 
@@ -991,8 +1018,13 @@ local function main()
 	state.active = true
 	term.clear()
 
+	__G = table.copy(_G)
+	__G._G = __G
+	__G.Workspace = Workspace
+	__G.__WORKSPACE_RUNNING = true
+
 	for k,v in pairs(config.space_grid) do
-		Workspace.Add(config.default_program, k)
+		Workspace.Add(config.default_program, k, nil, false)
 	end
 
 	state.x = 1
@@ -1032,10 +1064,27 @@ local function main()
 	local is_redraw_tick = false
 	local c_term = term.current()
 
+	if (fs.exists(fs.combine(_CONFIG_DIR, _WS_STARTUP_PATH))) then
+		local _f = loadfile( fs.combine(_CONFIG_DIR, _WS_STARTUP_PATH) )
+		local _e = {Workspace = Workspace, state = state}
+		setmetatable(_e, {__index = _ENV})
+		setfenv(_f, _e)
+		_f()
+	else
+		local file = fs.open(fs.combine(_CONFIG_DIR, _WS_STARTUP_PATH), "w")
+		file.writeLine("-- This file will be ran once upon starting Workspace after spawning all instances.")
+		file.writeLine("-- You can use this file to arrange Workspaces how you want.")
+		file.writeLine("-- Example: ")
+		file.writeLine("-- Workspace.Clear()")
+		file.writeLine("-- Workspace.Add(nil, 1, 1, false) -- defaults to shell.lua") 
+		file.writeLine("-- Workspace.Add(\"rom/programs/fun/worm.lua\", 2, 1, true)")
+		file.writeLine("-- Workspace.Select(2, 1)\n\n")
+		file.close()
+	end
+
 	while (state.active) do
 
 		is_redraw_tick = false
-		_G.__WORKSPACE_RUNNING = true
 
 		evt = {os.pullEventRaw()}
 
@@ -1368,13 +1417,13 @@ local function main()
 						state.do_refresh_config = true
 						table.remove(space.queued_events, 1)
 
-					elseif (canRunWorkspace(space, space.queued_events[1], true)) then
+					elseif (canRunWorkspace(space, space.queued_events[1], true) or (state.resumes == 0)) then
 						if (state.x == space.x and state.y == space.y) then
 							space.window.restoreCursor()
 						end
 						c_term = term.redirect(space.window)
 						Workspace.SetCustomFunctions(space)
-						space.yield_return = {coroutine.resume(space.coroutine, table.unpack(space.queued_events[1]))}
+						space.yield_return = {coroutine.resume(space.coroutine, table.unpack(space.queued_events[1] or {}))}
 						Workspace.ResetCustomFunctions()
 						times_queued = times_queued + 1
 						space.resumes = space.resumes + 1
@@ -1459,8 +1508,6 @@ if (first_run) then
 	waitForKey()
 end
 
-_G.__WORKSPACE_RUNNING = true
-
 while (state.active) do
 	status, err = pcall(main)
 	term.setTextColor(colors.white)
@@ -1475,5 +1522,3 @@ while (state.active) do
 		print("Thanks for using Workspace!")
 	end
 end
-
-_G.__WORKSPACE_RUNNING = false
