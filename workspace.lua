@@ -914,6 +914,30 @@ Workspace.Notification = function(mode, option)
 
 end
 
+-- selects the topleft-most workspace
+-- used if we desperately need SOME workspace to select, and don't care which
+local function selectGoodWorkspace(do_scroll)
+	local minx, miny = math.huge, math.huge
+	local maxx, maxy = -math.huge, -math.huge
+	for k,v in pairs(state.workspaces) do
+		minx = math.min(v.x, minx)
+		miny = math.min(v.y, miny)
+		maxx = math.max(v.x, maxx)
+		maxy = math.max(v.y, maxy)
+	end
+	for x = minx, maxx do
+		if (state.workspaces[XYtoIndex(x, miny)]) then
+			state.x = x
+			state.y = miny
+			if (do_scroll) then
+				state.scroll_x = x
+				state.scroll_y = miny
+			end
+			break
+		end
+	end
+end
+
 local function canRunWorkspace(space, evt, ignore_focus)
 	-- never trust a programming teacher who tells you to never early return
 	if (not evt) then
@@ -977,6 +1001,9 @@ local function main()
 
 	state.x = 1
 	state.y = 1
+	if not (state.workspaces[XYtoIndex(state.x, state.y)]) then
+		selectGoodWorkspace(true)
+	end
 	state.workspaces[XYtoIndex(state.x, state.y)].start_on_program = true
 
 	local evt = {}
@@ -1129,11 +1156,7 @@ local function main()
 								state.y = state.y + 1
 
 							else
-								for key, space in pairs(state.workspaces) do
-									state.x = space.x
-									state.y = space.y
-									break
-								end
+								selectGoodWorkspace(false)
 							end
 
 							Workspace.Notification("show_grid")
