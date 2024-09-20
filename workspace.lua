@@ -516,6 +516,16 @@ Workspace.SetCustomFunctions = function(space)
 		end
 	end
 
+	space.env.os.sleep = function(duration)
+		local tID = space.env.os.startTimer(duration)
+		local evt, _tID
+		repeat
+			evt, _tID = os.pullEvent()
+		until (evt == "timer") and (_tID == tID)
+	end
+
+	__G.sleep = space.env.os.sleep
+
 	space.env.os.clock = function()
 		return _base.os.clock() + space.clock_mod
 	end
