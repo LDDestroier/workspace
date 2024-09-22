@@ -16,8 +16,7 @@ local _BASE_SHELL = shell
 local first_run = true
 local tArg = {...}
 
--- copy of _G, defined in main
-local __G = {}
+local __G
 
 -- instructs on using the program
 local function showHelp()
@@ -64,7 +63,6 @@ local config = {
 
 	-- given names for specific programs to be written alongside the grid display
 	program_titles = {
-		["rom/programs/shell.lua"] = "Shell",
 		["rom/programs/edit.lua"] = "Edit",
 		["rom/programs/monitor.lua"] = "Monitor",
 		["rom/programs/lua.lua"] = "Lua Interpreter",
@@ -81,6 +79,7 @@ local config = {
 		["rom/programs/pocket/falling.lua"] = "Falling",
 		["rom/programs/rednet/chat.lua"] = "Chat",
 
+		["shell.lua"] = "Shell",
 		["cash.lua"] = "Cash",
 		["enchat3.lua"] = "Enchat 3",
 		["ldris.lua"] = "LDris",
@@ -739,7 +738,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 		_ENV.shell = _base.shell
 	end
 	
-	setmetatable(space.env, {__index = __G })
+	setmetatable(space.env, { __index = __G })
 	space.env.multishell = _ENV.multishell
 	setfenv(callable, space.env)
 	setfenv(loaded_file, space.env)
@@ -1025,14 +1024,28 @@ local function drawVoid(win)
 	end
 end
 
+-- set up fake _G table
+__G = {
+	Workspace = Workspace,
+	__WS_SPACE = {},
+	__WORKSPACE_RUNNING = true,
+}
+__G._G = __G
+
+setmetatable(__G, {
+	__index = function(tbl, key)
+		return _G[key]
+	end,
+
+	__newindex = function(tbl, key, value)
+		_G[key] = value
+	end
+})
+
+
 local function main()
 	state.active = true
 	term.clear()
-
-	__G = table.copy(_G)
-	__G._G = __G
-	__G.Workspace = Workspace
-	__G.__WORKSPACE_RUNNING = true
 
 	for k,v in pairs(config.space_grid) do
 		Workspace.Add(config.default_program, k, nil, false)
