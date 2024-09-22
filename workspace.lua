@@ -740,6 +740,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 	end
 	
 	setmetatable(space.env, {__index = __G })
+	space.env.multishell = _ENV.multishell
 	setfenv(callable, space.env)
 	setfenv(loaded_file, space.env)
 
