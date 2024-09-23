@@ -577,6 +577,19 @@ Workspace.SetCustomFunctions = function(space)
 		return space.og_window
 	end
 
+	space.env.term.redirect = function(target)
+		assert(type(target) == "table", "redirect target must be a table")
+
+		if (target == space.og_window) then
+			space.redirect_target = nil
+
+		else
+			space.redirect_target = target
+		end
+
+		return _base.term.redirect(target)
+	end
+
 	__G.__WS_SPACE = space
 end
 
@@ -591,6 +604,7 @@ Workspace.ResetCustomFunctions = function()
 	os.epoch = _base.os.epoch
 	os.queueEvent = _base.os.queueEvent
 	term.native = _base.term.native
+	term.redirect = _base.term.redirect
 	fs.open = _base.fs.open
 end
 
@@ -683,6 +697,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 			state.term_height,
 			false
 		),
+		redirect_target = nil
 	}
 	space.og_window = space.window
 	local runProgram
@@ -693,6 +708,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 		local status, err
 
 		runProgram = function(...)
+			term.redirect(space.window)
 			space.active = true
 			term.setTextColor(colors.white)
 			term.setBackgroundColor(colors.black)
@@ -1430,7 +1446,7 @@ local function main()
 					if (
 						(((current_time + space.time_mod) % 24) >= aTime) and 
 						(((current_time + space.time_mod) % 24) <= aTime + 0.001)
-						) then
+					) then
 						space.alarms[aID] = nil
 						table.insert(space.queued_events, {"alarm", aID})
 					end
@@ -1445,7 +1461,7 @@ local function main()
 						if (state.x == space.x and state.y == space.y) then
 							space.window.restoreCursor()
 						end
-						c_term = term.redirect(space.window)
+						c_term = term.redirect(space.redirect_target or space.window)
 						Workspace.SetCustomFunctions(space)
 						space.yield_return = {coroutine.resume(space.coroutine, table.unpack(space.queued_events[1] or {}))}
 						Workspace.ResetCustomFunctions()
@@ -1464,7 +1480,7 @@ local function main()
 					if (state.x == space.x and state.y == space.y) then
 						space.window.restoreCursor()
 					end
-					c_term = term.redirect(space.window)
+					c_term = term.redirect(space.redirect_target or space.window)
 					Workspace.SetCustomFunctions(space)
 					space.yield_return = {coroutine.resume(space.coroutine, table.unpack(evt))}
 					space.resumes = space.resumes + 1
@@ -1476,9 +1492,9 @@ local function main()
 			-- reposition windows so they move like a real desktop grid
 			if (Workspace.CheckVisible(space, state.drag_scroll[1], state.drag_scroll[2])) then
 				space.window.setVisible(true)
-					if (space.x ~= state.scroll_x) or (space.y ~= state.scroll_y) then
-						space.window.reposition(space_absX, space_absY)
-					end
+				if (space.x ~= state.scroll_x) or (space.y ~= state.scroll_y) then
+					space.window.reposition(space_absX, space_absY)
+				end
 			else
 				space.window.setVisible(false)
 			end
