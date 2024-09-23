@@ -745,7 +745,7 @@ Workspace.Generate = function(path, x, y, active, ...)
 	}
 	space.og_window = space.window
 	for i = 0, 15 do
-		space.palette[2^i] = {state.term.getPaletteColor(2^i)}
+		space.palette[2^i] = {term.nativePaletteColor(2^i)}
 	end
 	local runProgram
 
@@ -977,7 +977,7 @@ Workspace.Notification = function(mode, option)
 		y = 1
 		for _y = min_y, max_y do
 			y = y + 1
-			x = math.floor((width / 2) - ((max_x - min_x) / 2))
+			x = math.floor((width / 2) - math.ceil((max_x - min_x) / 2))
 			for _x = min_x, max_x do
 				x = x + 1
 				space = state.workspaces[XYtoIndex(_x, _y)]
@@ -1525,11 +1525,10 @@ local function main()
 			until (not canRunWorkspace(space, space.queued_events[1])) or (times_queued > max_queued)
 
 			-- change palette
-			if (state.do_refresh) then
-				if (space.x == state.x and space.y == state.y) then
-					for i = 0, 15 do
-						term.setPaletteColor(2^i, table.unpack(state.workspaces[XYtoIndex(state.x, state.y)].palette[2^i]))
-					end
+			if (state.do_refresh) and (is_redraw_tick) and (space.x == state.x and space.y == state.y) then
+				for i = 0, 15 do
+					space.window.setPaletteColor(2^i, table.unpack(space.palette[2^i]))
+					state.win_overlay.setPaletteColor(2^i, table.unpack(space.palette[2^i]))
 				end
 			end
 
