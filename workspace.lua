@@ -405,6 +405,8 @@ _base.os.time = os.time
 _base.os.epoch = os.epoch
 _base.os.queueEvent = os.queueEvent
 _base.term.redirect = term.redirect
+_base.term.setPaletteColor = term.setPaletteColor
+_base.term.setPaletteColour = term.setPaletteColour
 _base.term.native = term.native
 _base.fs.open = fs.open
 
@@ -577,6 +579,43 @@ Workspace.SetCustomFunctions = function(space)
 		return space.og_window
 	end
 
+	space.env.term.setPaletteColor = function(key, r, g, b)
+		assert(type(key) == "number", "bad argument #1 (expected number, got " .. type(key) .. ")")
+		key = math.floor(key)
+		if not (g or b) then
+			r, g, b = colors.unpackRGB(r)
+		end
+		for i = 15, 0, -1 do
+			if (key == 2^i) then
+				break
+			elseif (key > 2^i) then
+				key = 2^i
+				break
+			end
+		end
+		assert(key >= 0 and key < 2^16, "Colour out of range")
+		assert(type(r) == "number", "bad argument #2 (expected number, got " .. type(r) .. ")")
+		assert(type(g) == "number", "bad argument #3 (expected number, got " .. type(g) .. ")")
+		assert(type(b) == "number", "bad argument #4 (expected number, got " .. type(b) .. ")") 
+
+		space.palette[key][1] = r
+		space.palette[key][2] = g
+		space.palette[key][3] = b
+
+		if (space.x == state.x and space.y == state.y) then
+			_base.term.setPaletteColor(key, r, g, b)
+		end
+	end
+
+	space.env.term.setPaletteColour = space.env.term.setPaletteColor
+
+	space.env.term.getPaletteColor = function(key)
+		assert(type(key) == "number", "bad argument #1 (expected number, got " .. type(key) .. ")")
+		return table.unpack(space.palette[key])
+	end
+
+	space.env.term.getPaletteColour = space.env.term.getPaletteColor
+
 	space.env.term.redirect = function(target)
 		assert(type(target) == "table", "redirect target must be a table")
 
@@ -604,6 +643,10 @@ Workspace.ResetCustomFunctions = function()
 	os.epoch = _base.os.epoch
 	os.queueEvent = _base.os.queueEvent
 	term.native = _base.term.native
+	term.setPaletteColor = _base.term.setPaletteColor
+	term.setPaletteColor = _base.term.setPaletteColor
+	term.getPaletteColour = _base.term.getPaletteColor
+	term.getPaletteColour = _base.term.getPaletteColor
 	term.redirect = _base.term.redirect
 	fs.open = _base.fs.open
 end
@@ -697,9 +740,13 @@ Workspace.Generate = function(path, x, y, active, ...)
 			state.term_height,
 			false
 		),
+		palette = {},
 		redirect_target = nil
 	}
 	space.og_window = space.window
+	for i = 0, 15 do
+		space.palette[2^i] = {state.term.getPaletteColor(2^i)}
+	end
 	local runProgram
 
 	local loaded_file = loadfile(path)
@@ -996,6 +1043,9 @@ local function canRunWorkspace(space, evt, ignore_focus)
 		return false
 
 	elseif (focus_events[evt[1]] and (space.x ~= state.x or space.y ~= state.y) and (not ignore_focus)) then
+		return false
+	
+	elseif (focus_events[evt[1]] and not space.allow_input) then
 		return false
 
 	elseif (space.yield_return[2] == nil) or (space.yield_return[2] == evt[1]) or (evt[1] == "terminate") then
@@ -1473,6 +1523,15 @@ local function main()
 				end
 
 			until (not canRunWorkspace(space, space.queued_events[1])) or (times_queued > max_queued)
+
+			-- change palette
+			if (state.do_refresh) then
+				if (space.x == state.x and space.y == state.y) then
+					for i = 0, 15 do
+						term.setPaletteColor(2^i, table.unpack(state.workspaces[XYtoIndex(state.x, state.y)].palette[2^i]))
+					end
+				end
+			end
 
 			-- handle real events
 			if not ((did_command and focus_events[evt[1]]) or (evt[1] == "timer")) then
