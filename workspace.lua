@@ -55,7 +55,7 @@ local config = {
 	-- on higher resolution displays, this can have a performance hit
 	do_draw_void = true,
 
-	-- if true, then os.queueEvent will not send events to other workspaces
+	-- if (true,) then os.queueEvent will not send events to other workspaces
 	private_queued_events = false,
 
 	-- amount of time the workspace grid display is shown when it pops up
@@ -63,21 +63,25 @@ local config = {
 
 	-- given names for specific programs to be written alongside the grid display
 	program_titles = {
-		["rom/programs/edit.lua"] = "Edit",
-		["rom/programs/monitor.lua"] = "Monitor",
-		["rom/programs/lua.lua"] = "Lua Interpreter",
-		["rom/programs/gps.lua"] = "GPS",
-		["rom/programs/fun/adventure.lua"] = "Adventure",
-		["rom/programs/fun/dj.lua"] = "DJ",
-		["rom/programs/fun/hello.lua"] = "Hello world!",
-		["rom/programs/fun/speaker.lua"] = "Speaker",
-		["rom/programs/fun/worm.lua"] = "Worm",
-		["rom/programs/fun/advanced/gfxpaint.lua"] = "GFXPaint",
-		["rom/programs/fun/advanced/raycast.lua"] = "Raycast Demo",
-		["rom/programs/fun/advanced/redirection.lua"] = "Redirection",
-		["rom/programs/fun/advanced/pngview.lua"] = "PNGView",
-		["rom/programs/pocket/falling.lua"] = "Falling",
-		["rom/programs/rednet/chat.lua"] = "Chat",
+		["edit.lua"] = "Edit",
+		["monitor.lua"] = "Monitor",
+		["lua.lua"] = "Lua Interpreter",
+		["gps.lua"] = "GPS",
+		["adventure.lua"] = "Adventure",
+		["dj.lua"] = "DJ",
+		["hello.lua"] = "Hello world!",
+		["speaker.lua"] = "Speaker",
+		["worm.lua"] = "Worm",
+		["gfxpaint.lua"] = "GFXPaint",
+		["raycast.lua"] = "Raycast Demo",
+		["redirection.lua"] = "Redirection",
+		["pngview.lua"] = "PNGView",
+		["falling.lua"] = "Falling",
+		["chat.lua"] = "Chat",
+		["mbs.lua"] = "MBS",
+		["pipe_dream.lua"] = "Pipe Dream",
+		["kristify.lua"] = "Kristify",
+		["goldcube.lua"] = "Goldcube",
 
 		["shell.lua"] = "Shell",
 		["cash.lua"] = "Cash",
@@ -262,7 +266,7 @@ local state = {
 	-- if true, redraw all visible windows
 	do_redraw = true,
 
-	-- if true, then the user is currently clicking and dragging to move between workspaces
+	-- if (true,) then the user is currently clicking and dragging to move between workspaces
 	is_dragging = false,
 
 	-- window object for notifications (defined in main)
@@ -299,6 +303,26 @@ local function IndexToXY(key)
 	if (x and y) then
 		return x, y
 	end
+end
+
+-- loads shell.lua from file and returns callable
+local function loadShell()
+	local file = fs.open("rom/programs/shell.lua", "r")
+	local line, contents = "", ""
+	repeat
+		line = file.readLine()
+		
+		if (line) then
+			contents = contents .. line .. "\n"
+			if (line:match("shell = {}")) then
+				contents = contents .. "_G.__WS_SPACE.shell = shell\n"
+				contents = contents .. file.readAll()
+			end
+		end
+	until not line
+	file.close()
+
+	return load(contents)
 end
 
 function table.copy(tbl)
@@ -463,42 +487,43 @@ end
 -- ran at the beginning of every workspace coroutine resume
 Workspace.SetCustomFunctions = function(space)
 	assert(type(space) == "table", "space must be a table")
-	assert(type(space.env) == "table", "space.env isn't a table?")
+	assert(type(space.env) == "table", "hey, why isn't space.env a table?")
 
-	space.env.fs.open = function(path, mode)
-		if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
-			real_file = _base.fs.open(path, "r")
-			return {
-				close = function(...)
-					return real_file.close(...)
-				end,
-				readLine = function(...)
-					return real_file.readLine(...)
-				end,
-				read = function(...)
-					return real_file.read(...)
-				end,
-				seek = function(...)
-					return real_file.seek(...)
-				end,
-				readAll = function(...)
-					local output = real_file.readAll(...)
-					output = output:gsub("shell.run%(v%)", "")
-					output = output .. [[
-						_G.__WS_SPACE.shell = shell
-					]]
-					return output
-				end
-			}
-
-		else
-			return _base.fs.open(path, mode)
-		end
-
-	end
+--	space.env.fs.open = function(path, mode)
+--		if (space.resumes == 0) and (path == "rom/startup.lua") and (mode == "r") then
+--			real_file = _base.fs.open(path, "r")
+--			return {
+--				close = function(...)
+--					return real_file.close(...)
+--				end,
+--				readLine = function(...)
+--					return real_file.readLine(...)
+--				end,
+--				read = function(...)
+--					return real_file.read(...)
+--				end,
+--				seek = function(...)
+--					return real_file.seek(...)
+--				end,
+--				readAll = function(...)
+--					local output = real_file.readAll(...)
+--					output = output:gsub("shell.run%(v%)", "")
+--					output = output .. [[
+--						_G.__WS_SPACE.shell = shell
+--					]]
+--					return output
+--				end
+--			}
+--
+--		else
+--			return _base.fs.open(path, mode)
+--		end
+--
+--	end
+	
 
 	space.env.os.startTimer = function(duration)
-		if type(duration) == "number" then
+		if (type(duration) == "number") then
 			state.new_timer_id = state.new_timer_id + 1
 			space.timers[state.new_timer_id] = _base.os.clock() + space.clock_mod + duration
 			return state.new_timer_id
@@ -509,7 +534,7 @@ Workspace.SetCustomFunctions = function(space)
 	end
 
 	space.env.os.cancelTimer = function(id)
-		if type(id) == "number" then
+		if (type(id) == "number") then
 			space.timers[id] = nil
 
 		else
@@ -551,7 +576,7 @@ Workspace.SetCustomFunctions = function(space)
 	end
 
 	space.env.os.cancelAlarm = function(id)
-		if type(id) == "number" then
+		if (type(id) == "number") then
 			space.alarms[id] = nil
 
 		else
@@ -560,7 +585,7 @@ Workspace.SetCustomFunctions = function(space)
 	end
 
 	space.env.os.queueEvent = function(evt, ...)
-		if type(evt) == "string" then
+		if (type(evt) == "string") then
 			if (focus_events[evt]) or (config.private_queued_events) then
 				table.insert(space.queued_events, {evt, ...})
 
@@ -579,39 +604,36 @@ Workspace.SetCustomFunctions = function(space)
 		return space.og_window
 	end
 
-	space.env.term.setPaletteColor = function(key, r, g, b)
-		assert(type(key) == "number", "bad argument #1 (expected number, got " .. type(key) .. ")")
-		key = math.floor(key)
-		if not (g or b) then
+	space.env.term.setPaletteColor = function(col_index, r, g, b)
+		assert(type(col_index) == "number", "bad argument #1 (expected number, got " .. type(col_index) .. ")")
+		col_index = math.floor(col_index)
+		if (not (g or b)) then
 			r, g, b = colors.unpackRGB(r)
 		end
 		for i = 15, 0, -1 do
-			if (key == 2^i) then
+			if (col_index == 2^i) then
 				break
-			elseif (key > 2^i) then
-				key = 2^i
+			elseif (col_index > 2^i) then
+				col_index = 2^i
 				break
 			end
 		end
-		assert(key >= 0 and key < 2^16, "Colour out of range")
+		assert(col_index >= 0 and col_index < 2^16, "Colour out of range")
 		assert(type(r) == "number", "bad argument #2 (expected number, got " .. type(r) .. ")")
 		assert(type(g) == "number", "bad argument #3 (expected number, got " .. type(g) .. ")")
 		assert(type(b) == "number", "bad argument #4 (expected number, got " .. type(b) .. ")") 
 
-		space.palette[key][1] = r
-		space.palette[key][2] = g
-		space.palette[key][3] = b
+		space.window.setPaletteColor(col_index, r, g, b)
 
 		if (space.x == state.x and space.y == state.y) then
-			_base.term.setPaletteColor(key, r, g, b)
+			_base.term.setPaletteColor(col_index, r, g, b)
 		end
 	end
 
 	space.env.term.setPaletteColour = space.env.term.setPaletteColor
 
-	space.env.term.getPaletteColor = function(key)
-		assert(type(key) == "number", "bad argument #1 (expected number, got " .. type(key) .. ")")
-		return table.unpack(space.palette[key])
+	space.env.term.getPaletteColor = function(col_index)
+		return space.window.getPaletteColor(col_index)
 	end
 
 	space.env.term.getPaletteColour = space.env.term.getPaletteColor
@@ -697,6 +719,8 @@ end
 
 -- makes a new workspace object
 Workspace.Generate = function(path, x, y, active, ...)
+	path = path or config.default_program
+	assert(type(path) == "string", "path must be string")
 	assert(type(x) == "number", "x must be number")
 	assert(type(y) == "number", "y must be number")
 
@@ -740,16 +764,16 @@ Workspace.Generate = function(path, x, y, active, ...)
 			state.term_height,
 			false
 		),
-		palette = {},
 		redirect_target = nil
 	}
 	space.og_window = space.window
 	for i = 0, 15 do
-		space.palette[2^i] = {term.nativePaletteColor(2^i)}
+		space.window.setPaletteColor(2^i, term.nativePaletteColor(2^i))
 	end
-	local runProgram
+	local runProgram, loaded_file
 
-	local loaded_file = loadfile(path)
+	-- loads a modified version of rom/programs/shell.lua that exposes 'shell' hook
+	loaded_file = loadShell()
 
 	local callable = function(space, ws_args)
 		local status, err
@@ -764,12 +788,19 @@ Workspace.Generate = function(path, x, y, active, ...)
 			term.setCursorBlink(true)
 			os.pullEvent()
 			space.resumes = 0
-			status, err = pcall(loaded_file, ...)
+			if (space.path == "rom/programs/shell.lua") then
+				status, err = pcall(loaded_file, ...)
+
+			else
+				status, err = pcall(loaded_file, space.path, ...)
+			end
+
 			if (status) then
 				space.last_error = nil
 			else
 				space.last_error = err
 			end
+
 			-- reset state
 			space.queued_events = {}
 			space.time_mod = 0
@@ -796,10 +827,18 @@ Workspace.Generate = function(path, x, y, active, ...)
 	end
 
 	if (space.path == "rom/programs/shell.lua") then
-		_ENV.shell = nil
+		--_ENV.shell = {}
+
 	else
 		_ENV.shell = _base.shell
 	end
+
+	space.env.shell = {
+		aliases = shell.aliases,
+		dir = shell.dir,
+		path = shell.path,
+		getCompletionInfo = shell.getCompletionInfo
+	}
 	
 	setmetatable(space.env, { __index = __G })
 	space.env.multishell = _ENV.multishell
@@ -843,7 +882,7 @@ Workspace.Swap = function(x1, y1, x2, y2)
 	assert(type(y2) == "number", "y2 must be number")
 
 	local key1, key2 = XYtoIndex(x1, y1), XYtoIndex(x2, y2)
-	if not (state.workspaces[key1] and state.workspaces[key2]) then
+	if (not (state.workspaces[key1] and state.workspaces[key2])) then
 		return false
 	else
 		state.workspaces[key1], state.workspaces[key2] = state.workspaces[key2], state.workspaces[key1]
@@ -985,13 +1024,13 @@ Workspace.Notification = function(mode, option)
 				if (space) then
 					if (space.x == state.x and space.y == state.y) then
 						win.setBackgroundColor(colors.lightGray)
-					elseif space.active then
+					elseif (space.active) then
 						win.setBackgroundColor(colors.gray)
 					else
 						win.setBackgroundColor(colors.black)
 					end
 
-					if space.paused then
+					if (space.paused) then
 						win.write("\7")
 					else
 						win.write(" ")
@@ -1119,7 +1158,7 @@ local function main()
 
 	state.x = 1
 	state.y = 1
-	if not (state.workspaces[XYtoIndex(state.x, state.y)]) then
+	if (not (state.workspaces[XYtoIndex(state.x, state.y)])) then
 		selectGoodWorkspace(true)
 	end
 	state.workspaces[XYtoIndex(state.x, state.y)].start_on_program = true
@@ -1193,7 +1232,7 @@ local function main()
 				if (keysDown[keys.ctrl] and keysDown[keys.shift]) then
 
 					if (evt[2] == keys.right) then
-						if keysDown[keys.tab] then
+						if (keysDown[keys.tab]) then
 							Workspace.Swap(state.x, state.y, state.x + 1, state.y)
 						else
 							tryMoveViewport(1, 0, true)
@@ -1202,7 +1241,7 @@ local function main()
 						did_command = true
 
 					elseif (evt[2] == keys.left) then
-						if keysDown[keys.tab] then
+						if (keysDown[keys.tab]) then
 							Workspace.Swap(state.x, state.y, state.x - 1, state.y)
 						else
 							tryMoveViewport(-1, 0, true)
@@ -1211,7 +1250,7 @@ local function main()
 						did_command = true
 
 					elseif (evt[2] == keys.up) then
-						if keysDown[keys.tab] then
+						if (keysDown[keys.tab]) then
 							Workspace.Swap(state.x, state.y, state.x, state.y - 1)
 						else
 							tryMoveViewport(0, -1, true)
@@ -1220,7 +1259,7 @@ local function main()
 						did_command = true
 
 					elseif (evt[2] == keys.down) then
-						if keysDown[keys.tab] then
+						if (keysDown[keys.tab]) then
 							Workspace.Swap(state.x, state.y, state.x, state.y + 1)
 						else
 							tryMoveViewport(0, 1, true)
@@ -1229,7 +1268,7 @@ local function main()
 						did_command = true
 
 					elseif (evt[2] == keys.p) then
-						if (_space.active) then
+						if (_space.active and config.allow_pausing) then
 							Workspace.PauseWorkspace(_space, not _space.paused)
 							Workspace.Notification("pause", _space.paused)
 							did_command = true
@@ -1524,16 +1563,8 @@ local function main()
 
 			until (not canRunWorkspace(space, space.queued_events[1])) or (times_queued > max_queued)
 
-			-- change palette
-			if (state.do_refresh) and (is_redraw_tick) and (space.x == state.x and space.y == state.y) then
-				for i = 0, 15 do
-					space.window.setPaletteColor(2^i, table.unpack(space.palette[2^i]))
-					state.win_overlay.setPaletteColor(2^i, table.unpack(space.palette[2^i]))
-				end
-			end
-
 			-- handle real events
-			if not ((did_command and focus_events[evt[1]]) or (evt[1] == "timer")) then
+			if (not ((did_command and focus_events[evt[1]]) or (evt[1] == "timer"))) then
 				if (canRunWorkspace(space, evt)) then
 					if (state.x == space.x and state.y == space.y) then
 						space.window.restoreCursor()
@@ -1588,7 +1619,7 @@ local function handleError(err)
 end
 
 -- :)
-if math.random(1, 2^16) == 100 then
+if (math.random(1, 2^16) == 100) then
 	printError("Fuck you, Curse of Ra")
 	return false
 end
