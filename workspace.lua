@@ -15,8 +15,11 @@ local _BASE_SHELL = shell
 
 local first_run = true
 local tArg = {...}
+local argument_default_program
 
 local __G
+
+assert(shell, "shell must be loaded to use Workspace")
 
 -- instructs on using the program
 local function showHelp()
@@ -175,6 +178,24 @@ local function getConfig(path)
 
 end
 
+-- stolen graciously from rom/programs/shell.lua
+local function tokenise(...)
+    local sLine = table.concat({ ... }, " ")
+    local tWords = {}
+    local bQuoted = false
+    for match in string.gmatch(sLine .. "\"", "(.-)\"") do
+        if bQuoted then
+            table.insert(tWords, match)
+        else
+            for m in string.gmatch(match, "[^ \t]+") do
+                table.insert(tWords, m)
+            end
+        end
+        bQuoted = not bQuoted
+    end
+    return tWords
+end
+
 -- allow changing config from commandline argument
 if (tArg[1] == "--config") then
 	shell.run("edit", fs.combine(_CONFIG_DIR, _CONFIG_PATH))
@@ -186,7 +207,11 @@ if (tArg[1] == "--config") then
 elseif (tArg[1] == "--help") then
 	showHelp()
 	return true
+
+elseif (shell.resolveProgram(tArg[1] or "")) then
+	argument_default_program = table.concat(tArg, " ")
 end
+
 
 --[[
 if (_G.__WORKSPACE_RUNNING) then
@@ -394,14 +419,21 @@ local function creposition(win, width, height, parent)
 end
 
 -- waits for specified keypress, or returns when a specified event is queued
-local function waitForKey(key, break_events)
-	os.pullEvent()
+local function waitForKey(tKeys, break_events)
+--	os.pullEvent()
 	local evt, _key, _repeat
 	while true do
 		evt, _key, _repeat = os.pullEvent()
 		if (evt == "key") then
-			if (not key) or (key == _key) then
+			if (not key) then
 				return _key
+
+			else
+				for i = 1, #tKeys do
+					if (tKeys[i] == _key) then
+						return _key
+					end
+				end
 			end
 
 		elseif (break_events) then
@@ -706,7 +738,8 @@ Workspace.DrawInactiveScreen = function(space)
 	cwrite(space.path .. " " .. table.concat(space.args, " "), base_y - 1)
 	term.setTextColor(colors.white)
 	cwrite("Press Space to start workspace.", base_y + 1)
-	cwrite("(" .. space.x .. ", " .. space.y .. ")", base_y + 3)
+	cwrite("Press 'Q' to quit Workspace.", base_y + 2)
+	cwrite("(" .. space.x .. ", " .. space.y .. ")", base_y + 4)
 
 	if (space.last_error) then
 		cwrite("Last program's error:", base_y + 5)
@@ -724,7 +757,9 @@ Workspace.Generate = function(path, x, y, active, ...)
 	assert(type(x) == "number", "x must be number")
 	assert(type(y) == "number", "y must be number")
 
-	if (not fs.exists(path)) then
+	local tokenised_path = tokenise(path)
+
+	if (not shell.resolveProgram(tokenised_path[1])) then
 		error("invalid path '" .. path .. "'")
 	end
 
@@ -732,6 +767,8 @@ Workspace.Generate = function(path, x, y, active, ...)
 
 	local space = {
 		path = path,
+		tokenised_path = {},	-- populated from path
+		is_shell = false,
 		args = ws_args,
 		title = config.program_titles[path] or config.program_titles[fs.getName(path)] or fs.getName(path),
 		x = x,
@@ -766,6 +803,8 @@ Workspace.Generate = function(path, x, y, active, ...)
 		),
 		redirect_target = nil
 	}
+	space.tokenised_path = tokenised_path
+	space.is_shell = (fs.getName(shell.resolveProgram(space.tokenised_path[1]) or "") == "shell.lua")
 	space.og_window = space.window
 	for i = 0, 15 do
 		space.window.setPaletteColor(2^i, term.nativePaletteColor(2^i))
@@ -785,10 +824,10 @@ Workspace.Generate = function(path, x, y, active, ...)
 			term.setBackgroundColor(colors.black)
 			term.clear()
 			term.setCursorPos(1, 1)
-			term.setCursorBlink(true)
+			--term.setCursorBlink(true)
 			os.pullEvent()
 			space.resumes = 0
-			if (space.path == "rom/programs/shell.lua") then
+			if (space.is_shell) then
 				status, err = pcall(loaded_file, ...)
 
 			else
@@ -813,24 +852,28 @@ Workspace.Generate = function(path, x, y, active, ...)
 			space.resumes = 0
 		end
 
+		local _key
+
 		if (space.start_on_program) then
 			os.queueEvent("timer", 0)
 			runProgram(table.unpack(ws_args))
 		end
+
 		while true do
 			space.active = false
 			Workspace.DrawInactiveScreen(space)
-			if ( waitForKey(keys.space, {["term_resize"] = true, ["workspace_swap"] = true}) ) then
+			
+			_key = waitForKey({keys.space, keys.q}, {["term_resize"] = true, ["workspace_swap"] = true})
+
+			if ( _key == keys.space ) then
+				-- Start this workspace
 				runProgram(table.unpack(ws_args))
+
+			elseif (_key == keys.q) then
+				-- Quit workspace (the whole program)
+				state.active = false
 			end
 		end
-	end
-
-	if (space.path == "rom/programs/shell.lua") then
-		--_ENV.shell = {}
-
-	else
-		_ENV.shell = _base.shell
 	end
 
 	space.env.shell = {
@@ -1160,6 +1203,10 @@ local function main()
 	state.y = 1
 	if (not (state.workspaces[XYtoIndex(state.x, state.y)])) then
 		selectGoodWorkspace(true)
+	end
+	if (argument_default_program) then
+		Workspace.Remove(state.x, state.y)
+		Workspace.Add(argument_default_program, state.x, state.y)
 	end
 	state.workspaces[XYtoIndex(state.x, state.y)].start_on_program = true
 
@@ -1649,5 +1696,7 @@ while (state.active) do
 		term.clear()
 		term.setCursorPos(1, 1)
 		print("Thanks for using Workspace!")
+		os.queueEvent("")
+		os.pullEvent()
 	end
 end
