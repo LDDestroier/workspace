@@ -1,13 +1,10 @@
 --[[
-Workspace v2
+Workspace v2.1
   by LDDestroier
 
   TODO:
-    * refactor monitor mirroring code
-    * make UI for easy monitor mirroring
     * add global menu
 	* add a file picker
-
 --]]
 
 local _CONFIG_DIR = ".workspace"
@@ -24,16 +21,39 @@ local __G
 assert(shell, "shell must be loaded to use Workspace")
 
 -- instructs on using the program
-local function showHelp()
-	print("CTRL+SHIFT+Arrow to change space.")
-	print("CTRL+SHIFT+[WASD] to add a space.")
-	print("CTRL+SHIFT+TAB+Arrow to swap spaces.")
-	print("CTRL+SHIFT+Q to delete the space.")
-	print("CTRL+SHIFT+P to pause the space.")
---	print("CTRL+SHIFT+M to open global menu.")
-	print("Terminate on an inactive space to quit.")
-	print("Run workspace --config to edit config.")
-	print("Run workspace --select [x] [y] to change space.")
+local function showHelp( cmd )
+	if cmd == "--mirror" then
+		print("workspace --mirror <monitor> [x] [y]\n")
+		print("Enables mirroring of the current workspace, or one at coordinates (x, y), to a monitor.")
+		print("Can be undone using 'workspace --unmirror ...'")
+
+	elseif cmd == "--unmirror" then
+		print("workspace --unmirror <monitor> [x] [y]\n")
+		print("Disables mirroring of the current workspace, or one at (x, y), to a monitor.")
+
+	elseif cmd == "--select" then
+		print("workspace --select <x> <y>\n")
+		print("Moves the viewport to the workspace at (x, y).")
+		print("This can also be done with key combinations.")
+
+	elseif cmd == "--config" then
+		print("workspace --config\n")
+		print("Opens the workspace configuration file.")
+
+	else
+		print("workspace --config")
+		print("workspace --select <x> <y>")
+		print("workspace --mirror <monitor> [x] [y]")
+		print("workspace --unmirror <monitor>")
+		print("")
+		print("CTRL+SHIFT+Arrow to change space.")
+		print("CTRL+SHIFT+[WASD] to add a space.")
+		print("CTRL+SHIFT+TAB+Arrow to swap spaces.")
+		print("CTRL+SHIFT+Q to delete the space.")
+		print("CTRL+SHIFT+P to pause the space.")
+	--	print("CTRL+SHIFT+M to open global menu.") -- working on it (maybe)
+		print("Terminate on an inactive space to quit.")
+	end
 end
 
 local config = {
@@ -121,7 +141,8 @@ local config = {
 	},
 	space_grid = {
 		["1,1"] = true
-	}
+	},
+	monitor_mirrors = {}
 }
 
 -- serializes and organizes by value type
@@ -190,8 +211,8 @@ local function getConfig(path)
 
 			-- set bounds
 			config.scroll_speed = math.min(math.max(config.scroll_speed, 0.001), 1)
-
 			return true
+
 		else
 			return false
 		end
@@ -200,6 +221,10 @@ local function getConfig(path)
 		return false
 	end
 
+end
+
+local function printf(...)
+	return print( string.format(...) )
 end
 
 -- stolen graciously from rom/programs/shell.lua
@@ -234,8 +259,86 @@ elseif (tArg[1] == "--select") then
 		return true
 	end
 
-	local new_x, new_y = tonumber(tArg[2]) or __WS_SPACE.x, tonumber(tArg[3]) or __WS_SPACE.y
-	Workspace.Select(new_x, new_y, true)
+	local new_x, new_y = tonumber(tArg[2]), tonumber(tArg[3])
+	if not (new_x and new_y) then
+		showHelp("--select")
+		return true
+
+	elseif Workspace.Select(new_x, new_y, true) then
+		return true
+
+	else
+		printf("No such workspace at %s, %s", new_x, new_y)
+		return false
+	end
+
+elseif (tArg[1] == "--mirror") then
+	if (not _G.__WORKSPACE_RUNNING) then
+		printf("\"%s\" only works while Workspace is running.", tArg[1])
+		return true
+	end
+
+	local mon_name = tArg[2]
+	local wx, wy = tArg[3], tArg[4]
+	
+	if not mon_name then
+		showHelp("--mirror")
+
+	elseif not peripheral.wrap(mon_name) then
+		print("No such monitor.")
+	
+	elseif peripheral.getType(mon_name) ~= "monitor" then
+		printf("%s is a %s, expected a monitor.", mon_name, peripheral.getType(mon_name))
+	
+	elseif (wx and not wy) then
+		showHelp("--mirror")
+
+	else
+		local space = Workspace.Get(wx, wy)
+		local conf = space:GetConfig()
+		if space:MirrorMonitor( mon_name ) then
+			-- write to config
+			conf.monitor_mirrors = conf.monitor_mirrors or {}
+			conf.monitor_mirrors[ mon_name ] = space.str_index
+			space:SetConfig(conf)
+		end
+		
+	end
+
+	return true
+
+elseif (tArg[1] == "--unmirror") then
+	if (not _G.__WORKSPACE_RUNNING) then
+		printf("\"%s\" only works while Workspace is running.", tArg[1])
+		return true
+	end
+
+	local mon_name = tArg[2]
+	local wx, wy = tArg[3], tArg[4]
+
+	if mon_name then
+		if not peripheral.find(mon_name) then
+			print("No such monitor.")
+			return true
+		end
+
+	elseif (wx and not wy) then
+		showHelp("--unmirror")
+
+	else
+		local space = Workspace.Get(wx, wy)
+		local conf = space:GetConfig()
+		local success, mons = space:UnmirrorMonitor( mon_name )
+		if success then
+			-- write to config
+			conf.monitor_mirrors = conf.monitor_mirrors or {}
+			for i, mon in ipairs(mons) do
+				conf.monitor_mirrors[ mon ] = nil
+			end
+			space:SetConfig(conf)
+		end
+	end
+
 	return true
 	
 elseif (tArg[1] == "--help") then
@@ -330,7 +433,8 @@ local state = {
 	in_global_menu = false,
 
 	-- used for monitor mirroring
-	monitors = {},
+	monitors = {}, -- tbl[ monitor name ] = peripheral wrapper
+	monitor_mirrors = {}, -- tbl[ monitor name ] = space.str_index
 
 	-- sentinal for entire program
 	active = true
@@ -504,6 +608,18 @@ Workspace.Get = function(x, y)
 	end
 end
 
+Workspace.GetConfig = function(path)
+	getConfig(path)
+	return config
+end
+
+-- careful with this
+Workspace.SetConfig = function(new_config, path)
+	assert(type(new_config) == "table", "config must be table")
+	config = new_config
+	setConfig(path)
+end
+
 Workspace.Select = function(x, y, instant_scroll)
 	local key = XYtoIndex(x, y)
 	if (state.workspaces[key]) then
@@ -524,7 +640,6 @@ Workspace.Select = function(x, y, instant_scroll)
 end
 
 -- clears entire workspace grid
--- should only be used if you immediately
 Workspace.Clear = function()
 	state.workspaces = {}
 	state.count = 0
@@ -812,6 +927,8 @@ Workspace.Generate = function(path, x, y, active, ...)
 		title = config.program_titles[path] or config.program_titles[fs.getName(path)] or fs.getName(path),
 		x = x,
 		y = y,
+		str_index = XYtoIndex(x, y),
+
 		env = {},
 		paused = false,
 		active = false,			-- false when waiting to start, true when running program
@@ -841,8 +958,6 @@ Workspace.Generate = function(path, x, y, active, ...)
 			false
 		),
 		redirect_target = nil,
-
-		monitor_mirrors = {}, -- monitor peripheral names
 	}
 
 	local draw_methods = {}
@@ -865,8 +980,8 @@ Workspace.Generate = function(path, x, y, active, ...)
 	} do
 		draw_methods[method] = space.window[method]
 		space.window[method] = function(...)
-			for i, mon_name in ipairs(space.monitor_mirrors) do
-				if state.monitors[mon_name] then
+			for mon_name, index in pairs(state.monitor_mirrors) do
+				if (index == space.str_index) then
 					state.monitors[mon_name][method](...)
 				end
 			end
@@ -874,18 +989,20 @@ Workspace.Generate = function(path, x, y, active, ...)
 		end
 	end
 
-	 -- blit acts weirdly on CraftOS-PC
-	function space.window.blit(...)
-		for i, mon_name in ipairs(space.monitor_mirrors) do
-			if state.monitors[mon_name] then
-				state.monitors[mon_name].blit(...)
-				state.monitors[mon_name].setBackgroundColor( space.window.getBackgroundColor() )
-				state.monitors[mon_name].setTextColor( space.window.getTextColor() )
+	-- blit acts weirdly on CraftOS-PC
+	if (_HOST or ""):match("CraftOS%-PC") then
+		local win = space.window
+		space.window.blit = function(...)
+			for mon_name, index in pairs(state.monitor_mirrors) do
+				if (index == space.str_index) then
+					state.monitors[mon_name].blit(...)
+					state.monitors[mon_name].setBackgroundColor(win.getBackgroundColor())
+					state.monitors[mon_name].setTextColor(win.getTextColor())
+				end
 			end
+			draw_methods.blit(...)
 		end
-		draw_methods.blit(...)
 	end
-
 
 	space.tokenised_path = tokenised_path
 	space.is_shell = (fs.getName(shell.resolveProgram(space.tokenised_path[1]) or "") == "shell.lua")
@@ -960,6 +1077,48 @@ Workspace.Generate = function(path, x, y, active, ...)
 		end
 	end
 
+	-- add methods that call back to 'Workspace'
+	
+	function space:GetConfig(path)
+		return Workspace.GetConfig(path)
+	end
+
+	function space:SetConfig(new_config, path)
+		return Workspace.SetConfig(new_config, path)
+	end
+
+	function space:Select()
+		return Workspace.Select(space.x, space.y, false)
+	end
+
+	function space:CheckBounds(x, y)
+		return Workspace.CheckBounds(space, x, y)
+	end
+
+	function space:Swap(x, y)
+		return Workspace.Swap(space.x, space.y, x, y)
+	end
+
+	function space:Remove()
+		return Workspace.Remove(space.x, space.y)
+	end
+
+	function space:CheckVisible(modx, mody)
+		return Workspace.CheckVisible(space, modx, mody)
+	end
+
+	function space:PauseWorkspace(pause)
+		return Workspace.PauseWorkspace(space, pause)
+	end
+
+	function space:MirrorMonitor(side)
+		return Workspace.MirrorMonitor(space, side)
+	end
+
+	function space:UnmirrorMonitor(side)
+		return Workspace.UnmirrorMonitor(space, side)
+	end
+
 	space.env.shell = {
 		aliases = shell.aliases,
 		dir = shell.dir,
@@ -1015,8 +1174,10 @@ Workspace.Swap = function(x1, y1, x2, y2)
 		state.workspaces[key1], state.workspaces[key2] = state.workspaces[key2], state.workspaces[key1]
 		state.workspaces[key1].x = x1
 		state.workspaces[key1].y = y1
+--		state.workspaces[key1].str_index = XYtoIndex(x1, y1)
 		state.workspaces[key2].x = x2
 		state.workspaces[key2].y = y2
+--		state.workspaces[key2].str_index = XYtoIndex(x2, y2)
 		state.x = x2
 		state.y = y2
 		state.do_refresh = true
@@ -1067,6 +1228,51 @@ Workspace.PauseWorkspace = function(space, pause)
 		space.epoch_mod = space.epoch_last - os.epoch()
 		space.paused = false
 	end
+end
+
+Workspace.MirrorMonitor = function(space, side)
+	Workspace.FindMonitors()
+
+	if (not state.monitors[side]) then
+		return false
+	end
+	
+	state.monitor_mirrors[side] = space.str_index
+
+	-- replace contents of monitor with that of workspace
+	local mon = state.monitors[side]
+	mon.setBackgroundColor(colors.black)
+	mon.clear()
+	for y = 1, select(2, space.window.getSize()) do
+		mon.setCursorPos(1, y)
+		mon.blit( space.window.getLine(y) )
+	end
+	mon.setTextColor(space.window.getTextColor())
+	mon.setBackgroundColor(space.window.getBackgroundColor())
+	mon.setCursorPos(space.window.getCursorPos())
+
+	return true
+end
+
+Workspace.UnmirrorMonitor = function(space, side)
+	Workspace.FindMonitors()
+
+	local affected = {}
+
+	if side then
+		state.monitor_mirrors[side] = nil
+
+	else
+		-- unmirror all monitors associated with space
+		for _side, _index in pairs(state.monitor_mirrors) do
+			if _index == space.str_index then
+				state.monitor_mirrors[_side] = nil
+				affected[#affected + 1] = _side
+			end
+		end
+	end
+
+	return true, affected
 end
 
 Workspace.GetGridMinMax = function()
@@ -1241,7 +1447,7 @@ local function tryMoveViewport(x, y, do_skip)
 	end
 end
 
-local function drawVoid(win)
+function Workspace.DrawVoid(win)
 	local line_ch = ("f"):rep(state.term_width)
 	local line_tx = ("f"):rep(state.term_width)
 	local line_bg = ("f"):rep(state.term_width)
@@ -1256,7 +1462,7 @@ local function drawVoid(win)
 	end
 end
 
-
+--[[
 local function globalMenu()
 	local options = {"Config", "Mirroring", "Exit"}
 
@@ -1293,8 +1499,7 @@ local function globalMenu()
 	-- the monitor mirroring menu should show every attached monitor and let you quickly toggle which ones are mirrored
 	-- each monitor mirroring should save to the config file so it will persist
 end
-
-
+--]]
 
 -- set up fake _G table
 __G = {
@@ -1321,8 +1526,12 @@ local function main()
 
 	Workspace.FindMonitors()
 
-	for k,v in pairs(config.space_grid) do
-		Workspace.Add(config.default_program, k, nil, false)
+	for index,_ in pairs(config.space_grid or {}) do
+		Workspace.Add(config.default_program, index, nil, false)
+	end
+
+	for mon_name, index in pairs(config.monitor_mirrors or {}) do
+		Workspace.MirrorMonitor(state.workspaces[index], mon_name)
 	end
 
 	state.x = 1
@@ -1606,19 +1815,13 @@ local function main()
 
 		elseif (evt[1] == "monitor_touch") then
 			-- look for workspace that uses said monitor and queue a mouse_click event
-			-- TODO: index this the other way around (monitor 1toX workspace, as opposed to workspace 1toX monitor as it is now)
-			-- that would ensure each monitor can only have one workspace mirrored to it at most, and make indexing these events easier
-			-- this 2D for looping shit is dumb, please replace
-			for k,space in pairs(state.workspaces) do
-				if space.monitor_mirrors then
-					for _k, mon_name in ipairs(space.monitor_mirrors) do
-						if evt[2] == mon_name then
-							-- gotcha!!!
-							table.insert(space.queued_events, {"mouse_click", 1, evt[3], evt[4]})
-							break
-						end
-					end
-				end
+			if state.monitor_mirrors[ evt[2] ] then
+				table.insert( state.workspaces[ state.monitor_mirrors[evt[2]] ].queued_events or {}, {
+					"mouse_click",
+					1,
+					evt[3],
+					evt[4]
+				})
 			end
 
 		elseif (evt[1] == "timer") or state.do_force_scroll then
@@ -1701,7 +1904,7 @@ local function main()
 			state.use_alt_term = true
 			if (is_redraw_tick) then
 				if (config.do_draw_void) then
-					drawVoid(state.alt_term)
+					Workspace.DrawVoid(state.alt_term)
 				else
 					state.alt_term.clear()
 				end
