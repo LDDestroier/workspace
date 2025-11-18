@@ -3,7 +3,9 @@ Workspace v2
   by LDDestroier
 
   TODO:
-	* find out how to access each currently running shell program via debug API
+    * refactor monitor mirroring code
+    * make UI for easy monitor mirroring
+    * add global menu
 	* add a file picker
 
 --]]
@@ -28,11 +30,30 @@ local function showHelp()
 	print("CTRL+SHIFT+TAB+Arrow to swap spaces.")
 	print("CTRL+SHIFT+Q to delete the space.")
 	print("CTRL+SHIFT+P to pause the space.")
+--	print("CTRL+SHIFT+M to open global menu.")
 	print("Terminate on an inactive space to quit.")
-	print("Run Workspace with --config to edit config.")
+	print("Run workspace --config to edit config.")
+	print("Run workspace --select [x] [y] to change space.")
 end
 
 local config = {
+	controls = {
+		quit           = "ctrl+shift+q",
+		pause          = "ctrl+shift+p",
+		global_menu    = "ctrl+shift+m",
+		viewport_up    = "ctrl+shift+up",
+		viewport_down  = "ctrl+shift+down",
+		viewport_right = "ctrl+shift+right",
+		viewport_left  = "ctrl+shift+left",
+		add_ws_up      = "ctrl+shift+w",
+		add_ws_down    = "ctrl+shift+s",
+		add_ws_left    = "ctrl+shift+a",
+		add_ws_right   = "ctrl+shift+d",
+		swap_ws_up     = "ctrl+shift+tab+up",
+		swap_ws_down   = "ctrl+shift+tab+down",
+		swap_ws_left   = "ctrl+shift+tab+left",
+		swap_ws_right  = "ctrl+shift+tab+right",
+	},
 
 	-- speed at which viewport scrolls by. range is between 0.001 and 1
 	scroll_speed = 0.35,
@@ -89,9 +110,12 @@ local config = {
 		["shell.lua"] = "Shell",
 		["cash.lua"] = "Cash",
 		["enchat3.lua"] = "Enchat 3",
-		["ldris.lua"] = "LDris",
+		["ldris.lua"] = "LDRIS",
+		["ldris2.lua"] = "LDRIS 2",
+		["vile.lua"] = "ViLe",
 		["workspace.lua"] = "Workspace",
 		["pain.lua"] = "PAIN",
+		["std.lua"] = "STD",
 		["stdgui.lua"] = "STD-GUI",
 		["tron.lua"] = "Tron",
 	},
@@ -204,6 +228,16 @@ if (tArg[1] == "--config") then
 	end
 	return true
 
+elseif (tArg[1] == "--select") then
+	if (not _G.__WORKSPACE_RUNNING) then
+		print("\"--select\" only works while Workspace is running.")
+		return true
+	end
+
+	local new_x, new_y = tonumber(tArg[2]) or __WS_SPACE.x, tonumber(tArg[3]) or __WS_SPACE.y
+	Workspace.Select(new_x, new_y, true)
+	return true
+	
 elseif (tArg[1] == "--help") then
 	showHelp()
 	return true
@@ -211,17 +245,6 @@ elseif (tArg[1] == "--help") then
 elseif (shell.resolveProgram(tArg[1] or "")) then
 	argument_default_program = table.concat(tArg, " ")
 end
-
-
---[[
-if (_G.__WORKSPACE_RUNNING) then
-	if (shell.getRunningProgram() ~= "startup.lua") then
-		print("Workspace is already running.\n")
-		showHelp()
-	end
-	return true
-end
---]]
 
 -- keyDown key for either option key
 keys.ctrl = 500
@@ -303,6 +326,11 @@ local state = {
 
 	drag_spots = {{}, {}},
 	drag_scroll = {0, 0},
+
+	in_global_menu = false,
+
+	-- used for monitor mirroring
+	monitors = {},
 
 	-- sentinal for entire program
 	active = true
@@ -487,6 +515,7 @@ Workspace.Select = function(x, y, instant_scroll)
 		end
 		state.do_redraw = true
 		state.do_refresh = true
+		state.timer.do_force_scroll = true
 		state.timer.scroll = os.startTimer(0)
 		return true
 	else
@@ -501,6 +530,16 @@ Workspace.Clear = function()
 	state.count = 0
 	state.do_redraw = true
 	state.do_refresh = true
+end
+
+-- populates list of monitors for use with monitor mirroring
+Workspace.FindMonitors = function()
+	state.monitors = {}
+	for i, side in ipairs(peripheral.getNames()) do
+		if peripheral.getType(side) == "monitor" then
+			state.monitors[side] = peripheral.wrap(side)
+		end
+	end
 end
 
 -- checks if absolute x, y overlaps with the space's window
@@ -801,8 +840,53 @@ Workspace.Generate = function(path, x, y, active, ...)
 			state.term_height,
 			false
 		),
-		redirect_target = nil
+		redirect_target = nil,
+
+		monitor_mirrors = {}, -- monitor peripheral names
 	}
+
+	local draw_methods = {}
+
+	-- set up space's window for monitor mirrors
+	for i, method in ipairs{
+		"write",
+		"blit",
+		"clear",
+		"clearLine",
+		"setTextColor",
+		"setTextColour",
+		"setBackgroundColor",
+		"setBackgroundColour",
+		"setPaletteColor",
+		"setPaletteColour",
+		"setCursorPos",
+		"setCursorBlink",
+		"scroll",
+	} do
+		draw_methods[method] = space.window[method]
+		space.window[method] = function(...)
+			for i, mon_name in ipairs(space.monitor_mirrors) do
+				if state.monitors[mon_name] then
+					state.monitors[mon_name][method](...)
+				end
+			end
+			draw_methods[method](...)
+		end
+	end
+
+	 -- blit acts weirdly on CraftOS-PC
+	function space.window.blit(...)
+		for i, mon_name in ipairs(space.monitor_mirrors) do
+			if state.monitors[mon_name] then
+				state.monitors[mon_name].blit(...)
+				state.monitors[mon_name].setBackgroundColor( space.window.getBackgroundColor() )
+				state.monitors[mon_name].setTextColor( space.window.getTextColor() )
+			end
+		end
+		draw_methods.blit(...)
+	end
+
+
 	space.tokenised_path = tokenised_path
 	space.is_shell = (fs.getName(shell.resolveProgram(space.tokenised_path[1]) or "") == "shell.lua")
 	space.og_window = space.window
@@ -1172,6 +1256,46 @@ local function drawVoid(win)
 	end
 end
 
+
+local function globalMenu()
+	local options = {"Config", "Mirroring", "Exit"}
+
+	local selected = 1
+
+	local function render_bottom_bar()
+		term.setCursorPos(2, scr_y)
+		term.setBackgroundColor(colors.gray)
+		term.clearLine()
+		local cx = 2
+		for i = 1, #options do
+			if i == selected then
+				term.setBackgroundColor(colors.black)
+				term.setTextColor(colors.yellow)
+			else
+				term.setBackgroundColor(colors.gray)
+				term.setTextColor(colors.white)
+			end
+			term.write(options[i])
+			cx = cx + #options[i] + 1
+			term.setCursorPos(cx, scr_y)
+		end
+	end
+
+	local function config_menu()
+		-- same as running workspace with "--config"
+		shell.run("edit", fs.combine(_CONFIG_DIR, _CONFIG_PATH))
+		if (_G.__WORKSPACE_RUNNING) then
+			os.queueEvent("workspace_refresh_config")
+		end
+	end
+
+	-- TODO: finish all this garbage
+	-- the monitor mirroring menu should show every attached monitor and let you quickly toggle which ones are mirrored
+	-- each monitor mirroring should save to the config file so it will persist
+end
+
+
+
 -- set up fake _G table
 __G = {
 	Workspace = Workspace,
@@ -1194,6 +1318,8 @@ setmetatable(__G, {
 local function main()
 	state.active = true
 	term.clear()
+
+	Workspace.FindMonitors()
 
 	for k,v in pairs(config.space_grid) do
 		Workspace.Add(config.default_program, k, nil, false)
@@ -1242,7 +1368,7 @@ local function main()
 
 	if (fs.exists(fs.combine(_CONFIG_DIR, _WS_STARTUP_PATH))) then
 		local _f = loadfile( fs.combine(_CONFIG_DIR, _WS_STARTUP_PATH) )
-		local _e = {Workspace = Workspace, state = state}
+		local _e = { Workspace = Workspace, state = state }
 		setmetatable(_e, {__index = _ENV})
 		setfenv(_f, _e)
 		_f()
@@ -1258,6 +1384,8 @@ local function main()
 		file.close()
 	end
 
+ 	local keycombo
+
 	while (state.active) do
 
 		is_redraw_tick = false
@@ -1266,125 +1394,143 @@ local function main()
 
 		_space = state.workspaces[XYtoIndex(state.x, state.y)]
 
-		if (evt[1] == "key") then
-			if (not evt[3]) then
-				keysDown[ evt[2] ] = os.epoch()
-				keysDown[ keys.ctrl ] = (keysDown[keys.leftCtrl] or keysDown[keys.rightCtrl])
-				keysDown[ keys.alt ] = (keysDown[keys.leftAlt] or keysDown[keys.rightAlt])
-				keysDown[ keys.shift ] = (keysDown[keys.leftShift] or keysDown[keys.rightShift])
+		if (evt[1] == "key") and (not evt[3]) then
+			keysDown[ evt[2] ] = os.epoch()
+			keysDown[ keys.ctrl ] = (keysDown[keys.leftCtrl] or keysDown[keys.rightCtrl])
+			keysDown[ keys.alt ] = (keysDown[keys.leftAlt] or keysDown[keys.rightAlt])
+			keysDown[ keys.shift ] = (keysDown[keys.leftShift] or keysDown[keys.rightShift])
 
-				-- handle key combinations
+			-- handle key combinations
 
-				-- CTRL + SHIFT + ?
-				if (keysDown[keys.ctrl] and keysDown[keys.shift]) then
+			keycombo = ""
 
-					if (evt[2] == keys.right) then
-						if (keysDown[keys.tab]) then
-							Workspace.Swap(state.x, state.y, state.x + 1, state.y)
-						else
-							tryMoveViewport(1, 0, true)
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			if keysDown[ keys.ctrl ] and (evt[2] ~= keys.leftCtrl and evt[2] ~= keys.rightCtrl) then
+				keycombo = keycombo .. "ctrl+"
+			end
+			if keysDown[ keys.shift ] and (evt[2] ~= keys.leftShift and evt[2] ~= keys.rightShift) then
+				keycombo = keycombo .. "shift+"
+			end
+			if keysDown[ keys.alt ] and (evt[2] ~= keys.leftAlt and evt[2] ~= keys.rightAlt) then
+				keycombo = keycombo .. "alt+"
+			end
+			if keysDown[ keys.tab ] and evt[2] ~= keys.tab then
+				keycombo = keycombo .. "tab+"
+			end
 
-					elseif (evt[2] == keys.left) then
-						if (keysDown[keys.tab]) then
-							Workspace.Swap(state.x, state.y, state.x - 1, state.y)
-						else
-							tryMoveViewport(-1, 0, true)
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			keycombo = keycombo .. keys.getName(evt[2])
 
-					elseif (evt[2] == keys.up) then
-						if (keysDown[keys.tab]) then
-							Workspace.Swap(state.x, state.y, state.x, state.y - 1)
-						else
-							tryMoveViewport(0, -1, true)
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			if keycombo == config.controls.global_menu then
+				--state.in_global_menu = not state.in_global_menu
+				--did_command = true
 
-					elseif (evt[2] == keys.down) then
-						if (keysDown[keys.tab]) then
-							Workspace.Swap(state.x, state.y, state.x, state.y + 1)
-						else
-							tryMoveViewport(0, 1, true)
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			elseif keycombo == config.controls.swap_ws_right then
+				Workspace.Swap(state.x, state.y, state.x + 1, state.y)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-					elseif (evt[2] == keys.p) then
-						if (_space.active and config.allow_pausing) then
-							Workspace.PauseWorkspace(_space, not _space.paused)
-							Workspace.Notification("pause", _space.paused)
-							did_command = true
-						end
+			elseif keycombo == config.controls.swap_ws_left then
+				Workspace.Swap(state.x, state.y, state.x - 1, state.y)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-					elseif (evt[2] == keys.w) then
-						Workspace.Add(config.default_program, state.x, state.y - 1)
-						if (config.update_space_grid) then
-							config.space_grid[XYtoIndex(state.x, state.y - 1)] = true
-							setConfig()
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			elseif keycombo == config.controls.swap_ws_up then
+				Workspace.Swap(state.x, state.y, state.x, state.y - 1)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-					elseif (evt[2] == keys.s) then
-						Workspace.Add(config.default_program, state.x, state.y + 1)
-						if (config.update_space_grid) then
-							config.space_grid[XYtoIndex(state.x, state.y + 1)] = true
-							setConfig()
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			elseif keycombo == config.controls.swap_ws_down then
+				Workspace.Swap(state.x, state.y, state.x, state.y + 1)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-					elseif (evt[2] == keys.a) then
-						Workspace.Add(config.default_program, state.x - 1, state.y)
-						if (config.update_space_grid) then
-							config.space_grid[XYtoIndex(state.x - 1, state.y)] = true
-							setConfig()
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			elseif keycombo == config.controls.viewport_right then
+				tryMoveViewport(1, 0, true)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-					elseif (evt[2] == keys.d) then
-						Workspace.Add(config.default_program, state.x + 1, state.y)
-						if (config.update_space_grid) then
-							config.space_grid[XYtoIndex(state.x + 1, state.y)] = true
-							setConfig()
-						end
-						Workspace.Notification("show_grid")
-						did_command = true
+			elseif keycombo == config.controls.viewport_left then
+				tryMoveViewport(-1, 0, true)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-					elseif (evt[2] == keys.q) then
-						if (state.count >= 2) then
-							Workspace.Remove(state.x, state.y)
-							if (config.update_space_grid) then
-								config.space_grid[XYtoIndex(state.x, state.y)] = nil
-								setConfig()
-							end
-							if (state.workspaces[XYtoIndex(state.x - 1, state.y)]) then
-								state.x = state.x - 1
+			elseif keycombo == config.controls.viewport_up then
+				tryMoveViewport(0, -1, true)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-							elseif (state.workspaces[XYtoIndex(state.x + 1, state.y)]) then
-								state.x = state.x + 1
+			elseif keycombo == config.controls.viewport_down then
+				tryMoveViewport(0, 1, true)
+				Workspace.Notification("show_grid")
+				did_command = true
 
-							elseif (state.workspaces[XYtoIndex(state.x, state.y - 1)]) then
-								state.y = state.y - 1
+			elseif keycombo == config.controls.pause then
+				if (_space.active and config.allow_pausing) then
+					Workspace.PauseWorkspace(_space, not _space.paused)
+					Workspace.Notification("pause", _space.paused)
+					did_command = true
+				end
 
-							elseif (state.workspaces[XYtoIndex(state.x, state.y + 1)]) then
-								state.y = state.y + 1
+			elseif keycombo == config.controls.add_ws_up then
+				Workspace.Add(config.default_program, state.x, state.y - 1)
+				if (config.update_space_grid) then
+					config.space_grid[XYtoIndex(state.x, state.y - 1)] = true
+					setConfig()
+				end
+				Workspace.Notification("show_grid")
+				did_command = true
 
-							else
-								selectGoodWorkspace(false)
-							end
+			elseif keycombo == config.controls.add_ws_down then
+				Workspace.Add(config.default_program, state.x, state.y + 1)
+				if (config.update_space_grid) then
+					config.space_grid[XYtoIndex(state.x, state.y + 1)] = true
+					setConfig()
+				end
+				Workspace.Notification("show_grid")
+				did_command = true
 
-							Workspace.Notification("show_grid")
-							did_command = true
-						end
+			elseif keycombo == config.controls.add_ws_left then
+				Workspace.Add(config.default_program, state.x - 1, state.y)
+				if (config.update_space_grid) then
+					config.space_grid[XYtoIndex(state.x - 1, state.y)] = true
+					setConfig()
+				end
+				Workspace.Notification("show_grid")
+				did_command = true
+
+			elseif keycombo == config.controls.add_ws_right then
+				Workspace.Add(config.default_program, state.x + 1, state.y)
+				if (config.update_space_grid) then
+					config.space_grid[XYtoIndex(state.x + 1, state.y)] = true
+					setConfig()
+				end
+				Workspace.Notification("show_grid")
+				did_command = true
+
+			elseif keycombo == config.controls.quit then
+				if (state.count >= 2) then
+					Workspace.Remove(state.x, state.y)
+					if (config.update_space_grid) then
+						config.space_grid[XYtoIndex(state.x, state.y)] = nil
+						setConfig()
+					end
+					if (state.workspaces[XYtoIndex(state.x - 1, state.y)]) then
+						state.x = state.x - 1
+
+					elseif (state.workspaces[XYtoIndex(state.x + 1, state.y)]) then
+						state.x = state.x + 1
+
+					elseif (state.workspaces[XYtoIndex(state.x, state.y - 1)]) then
+						state.y = state.y - 1
+
+					elseif (state.workspaces[XYtoIndex(state.x, state.y + 1)]) then
+						state.y = state.y + 1
+
+					else
+						selectGoodWorkspace(false)
 					end
 
+					Workspace.Notification("show_grid")
+					did_command = true
 				end
 			end
 
@@ -1458,8 +1604,30 @@ local function main()
 			state.drag_scroll[1] = 0
 			state.drag_scroll[2] = 0
 
-		elseif (evt[1] == "timer") then
-			if (evt[2] == state.timer.scroll) then
+		elseif (evt[1] == "monitor_touch") then
+			-- look for workspace that uses said monitor and queue a mouse_click event
+			-- TODO: index this the other way around (monitor 1toX workspace, as opposed to workspace 1toX monitor as it is now)
+			-- that would ensure each monitor can only have one workspace mirrored to it at most, and make indexing these events easier
+			-- this 2D for looping shit is dumb, please replace
+			for k,space in pairs(state.workspaces) do
+				if space.monitor_mirrors then
+					for _k, mon_name in ipairs(space.monitor_mirrors) do
+						if evt[2] == mon_name then
+							-- gotcha!!!
+							table.insert(space.queued_events, {"mouse_click", 1, evt[3], evt[4]})
+							break
+						end
+					end
+				end
+			end
+
+		elseif (evt[1] == "timer") or state.do_force_scroll then
+			if (evt[2] == state.timer.scroll) or state.do_force_scroll then
+				if state.do_force_scroll then
+					state.do_force_scroll = false
+					state.timer.scroll = os.startTimer(0)
+				end
+
 				local xdiff = state.x - state.scroll_x
 				local ydiff = state.y - state.scroll_y
 
