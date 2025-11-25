@@ -12,6 +12,8 @@ local _CONFIG_PATH = "workspace.cfg"
 local _WS_STARTUP_PATH = "start.lua"
 local _BASE_SHELL = shell
 
+local _EXPOSE_STATE = true
+
 local first_run = true
 local tArg = {...}
 local argument_default_program
@@ -183,7 +185,18 @@ local function niceSerialize(tbl)
 	output = output:sub(1, -2) .. "\n}"
 
 	return output
+end
 
+local function XYtoIndex(x, y)
+	return tostring(x) .. "," .. tostring(y)
+end
+
+local function IndexToXY(key)
+	local x = tonumber(key:match("%d*"))
+	local y = tonumber(key:match(",%d*"):sub(2))
+	if (x and y) then
+		return x, y
+	end
 end
 
 local function setConfig(path)
@@ -245,6 +258,50 @@ local function tokenise(...)
     return tWords
 end
 
+-- finds a monitor either by matching name, or by mirrored workspace
+-- returns success, side, [optional] x, y of mirroring workspace
+local function match_monitor(mon_name, wx, wy)
+	if (not _G.__WORKSPACE_RUNNING) then
+		return false, "workspace not running"
+	end
+
+	if (wx and not wy) then
+		return false, "invalid arguments"
+	end
+
+	if not (mon_name or wx or wy) then
+		return false, "invalid arguments"
+	end
+
+	local mirrors = Workspace.GetMirrors()
+
+	if mon_name then
+		if mirrors[mon_name] then
+			return true, mon_name, IndexToXY(mirrors[mon_name])
+
+		else
+			if peripheral.wrap(mon_name) then
+				if peripheral.getType(mon_name) == "monitor" then
+					return true, mon_name, wx, wy
+				else
+					return false, "wrong peripheral type"
+				end
+			end
+		end
+	end
+
+	if (wx and wy) then
+		local str_index = XYtoIndex(wx, wy)
+		for name, index in pairs(mirrors) do
+			if index == str_index then
+				return true, name, IndexToXY(index)
+			end
+		end
+	end
+
+	return false, "cannot find monitor"
+end
+
 -- allow changing config from commandline argument
 if (tArg[1] == "--config") then
 	shell.run("edit", fs.combine(_CONFIG_DIR, _CONFIG_PATH))
@@ -254,12 +311,13 @@ if (tArg[1] == "--config") then
 	return true
 
 elseif (tArg[1] == "--select") then
+	local new_x, new_y = tonumber(tArg[2]), tonumber(tArg[3])
+
 	if (not _G.__WORKSPACE_RUNNING) then
 		print("\"--select\" only works while Workspace is running.")
 		return true
 	end
 
-	local new_x, new_y = tonumber(tArg[2]), tonumber(tArg[3])
 	if not (new_x and new_y) then
 		showHelp("--select")
 		return true
@@ -273,70 +331,91 @@ elseif (tArg[1] == "--select") then
 	end
 
 elseif (tArg[1] == "--mirror") then
-	if (not _G.__WORKSPACE_RUNNING) then
-		printf("\"%s\" only works while Workspace is running.", tArg[1])
+
+	local success, mon_name, wx, wy = match_monitor(
+		tArg[2],
+		tonumber(tArg[3]),
+		tonumber(tArg[4])
+	)
+
+	if not success then
+		if mon_name == "workspace not running" then
+			printf("\"%s\" only works while Workspace is running.", tArg[1])
+		elseif mon_name == "invalid arguments" then
+			showHelp("--mirror")
+		elseif mon_name == "cannot find monitor" then
+			printf("Cannot find monitor '%s'.", tArg[1])
+		elseif mon_name == "wrong peripheral type" then
+			printf("'%s' is a %s, expected a monitor.", tArg[1], peripheral.getType(tArg[1]))
+		else
+			printf("Argument error: %s", mon_name)
+		end
 		return true
 	end
 
-	local mon_name = tArg[2]
-	local wx, wy = tArg[3], tArg[4]
-	
-	if not mon_name then
-		showHelp("--mirror")
+	local mirrors = Workspace.GetMirrors()
+	if mirrors[mon_name] then
+		printf("'%s' is already mirrored with (%s).", mon_name, mirrors[mon_name])
+		return true
+	end
 
-	elseif not peripheral.wrap(mon_name) then
-		print("No such monitor.")
-	
-	elseif peripheral.getType(mon_name) ~= "monitor" then
-		printf("%s is a %s, expected a monitor.", mon_name, peripheral.getType(mon_name))
-	
-	elseif (wx and not wy) then
-		showHelp("--mirror")
-
-	else
-		local space = Workspace.Get(wx, wy)
-		local conf = space:GetConfig()
-		if space:MirrorMonitor( mon_name ) then
-			-- write to config
-			conf.monitor_mirrors = conf.monitor_mirrors or {}
-			conf.monitor_mirrors[ mon_name ] = space.str_index
-			space:SetConfig(conf)
-		end
-		
+	local space = Workspace.Get(wx, wy)
+	local conf = space:GetConfig()
+	if space:MirrorMonitor( mon_name ) then
+		-- write to config
+		conf.monitor_mirrors = conf.monitor_mirrors or {}
+		conf.monitor_mirrors[ mon_name ] = space.str_index
+		space:SetConfig(conf)
 	end
 
 	return true
 
 elseif (tArg[1] == "--unmirror") then
-	if (not _G.__WORKSPACE_RUNNING) then
-		printf("\"%s\" only works while Workspace is running.", tArg[1])
+
+	Workspace.FindMonitors()
+
+	local success, mon_name, wx, wy
+
+	if tonumber(tArg[2]) and tonumber(tArg[3]) then
+		success, mon_name, wx, wy = match_monitor(
+			nil,
+			tonumber(tArg[2]),
+			tonumber(tArg[3])
+		)
+	else
+		success, mon_name, wx, wy = match_monitor(
+			tArg[2],
+			tonumber(tArg[3]),
+			tonumber(tArg[4])
+		)
+	end
+
+	if not success then
+		if mon_name == "workspace not running" then
+			printf("\"%s\" only works while Workspace is running.", tArg[1])
+		elseif mon_name == "invalid arguments" then
+			showHelp("--mirror")
+		elseif mon_name == "cannot find monitor" then
+			printf("Cannot find monitor '%s'.", tArg[1])
+		elseif mon_name == "wrong peripheral type" then
+			printf("%s is a %s, expected a monitor.", tArg[1], peripheral.getType(tArg[1]))
+		else
+			printf("Argument error: %s", mon_name)
+		end
 		return true
 	end
 
-	local mon_name = tArg[2]
-	local wx, wy = tArg[3], tArg[4]
+	local space = Workspace.Get(wx, wy)
+	local conf = space:GetConfig()
+	local success, mons = space:UnmirrorMonitor( mon_name )
 
-	if mon_name then
-		if not peripheral.find(mon_name) then
-			print("No such monitor.")
-			return true
+	if success then
+		-- write to config
+		conf.monitor_mirrors = conf.monitor_mirrors or {}
+		for i, mon in ipairs(mons) do
+			conf.monitor_mirrors[ mon ] = nil
 		end
-
-	elseif (wx and not wy) then
-		showHelp("--unmirror")
-
-	else
-		local space = Workspace.Get(wx, wy)
-		local conf = space:GetConfig()
-		local success, mons = space:UnmirrorMonitor( mon_name )
-		if success then
-			-- write to config
-			conf.monitor_mirrors = conf.monitor_mirrors or {}
-			for i, mon in ipairs(mons) do
-				conf.monitor_mirrors[ mon ] = nil
-			end
-			space:SetConfig(conf)
-		end
+		space:SetConfig(conf)
 	end
 
 	return true
@@ -448,18 +527,6 @@ state.alt_term.setGraphicsMode = term.current().setGraphicsMode
 local keysDown = {}
 for i = 1, 256 do
 	keysDown[i] = false
-end
-
-local function XYtoIndex(x, y)
-	return tostring(x) .. "," .. tostring(y)
-end
-
-local function IndexToXY(key)
-	local x = tonumber(key:match("%d*"))
-	local y = tonumber(key:match(",%d*"):sub(2))
-	if (x and y) then
-		return x, y
-	end
 end
 
 -- loads shell.lua from file and returns callable
@@ -598,7 +665,18 @@ _base.term.setPaletteColour = term.setPaletteColour
 _base.term.native = term.native
 _base.fs.open = fs.open
 
+Workspace.GetState = function()
+	if _EXPOSE_STATE then
+		return state
+	else
+		return false
+	end
+end
+
 Workspace.Get = function(x, y)
+	if type(x) == "string" then
+		x, y = IndexToXY(x)
+	end
 	if (not x) then
 		return __G.__WS_SPACE
 	else
@@ -606,6 +684,10 @@ Workspace.Get = function(x, y)
 		assert(type(y) == "number", "y must be number")
 		return state.workspaces[XYtoIndex(x, y)]
 	end
+end
+
+Workspace.GetMirrors = function()
+	return state.monitor_mirrors
 end
 
 Workspace.GetConfig = function(path)
